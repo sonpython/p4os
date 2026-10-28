@@ -26,6 +26,7 @@ pub mod clock;
 pub mod paint;
 pub mod game2048;
 pub mod youtube;
+pub mod examples;
 
 use p4os_sdk::AppInfo;
 
@@ -45,6 +46,3 @@ pub static APPS: &[AppInfo] = &[
     youtube::INFO,
 ];
 
-/// Demo apps shown on their own "Examples" page of the launcher. An empty
-/// group shows no page.
-pub static EXAMPLES: &[AppInfo] = &[];

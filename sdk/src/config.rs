@@ -26,6 +26,12 @@ pub const WIFI_PASSWORD: &str = "wifi.password";
 pub const UI_ORIENTATION: &str = "ui.orientation";
 /// Backlight level in whole percent, "5".."100".
 pub const UI_BRIGHTNESS: &str = "ui.brightness";
+/// "performance", "balanced" or "battery" (see [`PowerMode`]).
+pub const POWER_MODE: &str = "power.mode";
+/// Seconds without input before the backlight dims; "0" = never.
+pub const POWER_DIM_S: &str = "power.dim_s";
+/// Seconds without input before the screen turns off; "0" = never.
+pub const POWER_OFF_S: &str = "power.off_s";
 
 /// YouTube app: Google OAuth client ("TVs and Limited Input devices").
 pub const YOUTUBE_CLIENT_ID: &str = "youtube.client_id";
@@ -226,6 +232,54 @@ pub fn parse_brightness(v: &str) -> Option<f32> {
     (1..=100).contains(&pct).then(|| (pct as f32 / 100.0).max(MIN_BRIGHTNESS))
 }
 
+/// Power policy: how eagerly the OS trades speed for battery life.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PowerMode {
+    /// Full CPU clock, Wi-Fi radio always on, periodic tick.
+    Performance,
+    /// Clock follows load (full speed on demand), Wi-Fi modem sleep.
+    #[default]
+    Balanced,
+    /// Lowest clocks that keep up, deeper Wi-Fi sleep, slower polling.
+    Battery,
+}
+
+pub const POWER_MODES: [PowerMode; 3] = [PowerMode::Performance, PowerMode::Balanced, PowerMode::Battery];
+
+pub fn power_mode_value(m: PowerMode) -> &'static str {
+    match m {
+        PowerMode::Performance => "performance",
+        PowerMode::Balanced => "balanced",
+        PowerMode::Battery => "battery",
+    }
+}
+
+pub fn parse_power_mode(v: &str) -> Option<PowerMode> {
+    POWER_MODES.into_iter().find(|&m| power_mode_value(m) == v)
+}
+
+/// Choices offered for the dim and screen-off timeouts, in seconds
+/// (0 = never). Stored values outside these lists are still honoured.
+pub const DIM_CHOICES_S: [u32; 5] = [0, 15, 30, 60, 120];
+pub const OFF_CHOICES_S: [u32; 5] = [0, 60, 120, 300, 600];
+pub const DEFAULT_DIM_S: u32 = 30;
+pub const DEFAULT_OFF_S: u32 = 120;
+/// Longest timeout accepted (one hour).
+pub const MAX_TIMEOUT_S: u32 = 3600;
+
+pub fn parse_timeout(v: &str) -> Option<u32> {
+    v.parse().ok().filter(|&s| s <= MAX_TIMEOUT_S)
+}
+
+/// Short label for a timeout: "Never", "45 s", "2 min".
+pub fn timeout_label(s: u32) -> String {
+    match s {
+        0 => "Never".into(),
+        s if s % 60 == 0 => alloc::format!("{} min", s / 60),
+        s => alloc::format!("{} s", s),
+    }
+}
+
 /// Validate Wi-Fi credentials before storing them: SSID 1-32 bytes;
 /// password empty (open network) or a WPA2 passphrase of 8-63 characters.
 pub fn check_wifi(ssid: &str, password: &str) -> Result<(), &'static str> {
@@ -337,6 +391,27 @@ mod tests {
         assert_eq!(parse_brightness("0"), None);
         assert_eq!(parse_brightness("101"), None);
         assert_eq!(parse_brightness("x"), None);
+    }
+
+    #[test]
+    fn power_values() {
+        for m in POWER_MODES {
+            assert_eq!(parse_power_mode(power_mode_value(m)), Some(m));
+        }
+        assert_eq!(parse_power_mode("turbo"), None);
+        assert_eq!(PowerMode::default(), PowerMode::Balanced);
+        assert_eq!(parse_timeout("0"), Some(0));
+        assert_eq!(parse_timeout("300"), Some(300));
+        assert_eq!(parse_timeout("3601"), None);
+        assert_eq!(parse_timeout("-1"), None);
+        assert_eq!(parse_timeout("x"), None);
+        assert_eq!(timeout_label(0), "Never");
+        assert_eq!(timeout_label(15), "15 s");
+        assert_eq!(timeout_label(120), "2 min");
+        for s in DIM_CHOICES_S.iter().chain(OFF_CHOICES_S.iter()) {
+            assert_eq!(parse_timeout(&alloc::format!("{s}")), Some(*s));
+        }
+        assert!(DIM_CHOICES_S.contains(&DEFAULT_DIM_S) && OFF_CHOICES_S.contains(&DEFAULT_OFF_S));
     }
 
     #[test]

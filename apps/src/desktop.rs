@@ -210,7 +210,7 @@ impl Desktop {
             catalogue: Catalogue::builtin(),
             pager: Pager::default(),
         }
-        .with_group("Examples", crate::EXAMPLES)
+        .with_group("Examples", crate::examples::EXAMPLES)
     }
 
     fn with_group(mut self, group: &'static str, apps: &'static [AppInfo]) -> Self {
@@ -628,6 +628,20 @@ impl Desktop {
         Some(wait)
     }
 
+    /// Run background work without drawing, for when nothing is shown
+    /// (screen off): background ticks (the foreground app included, as
+    /// while locked) and the periodic resource checks. Returns when it
+    /// wants to run again.
+    pub fn background_step(&mut self, sys: &mut dyn System) -> Option<u32> {
+        let now = sys.uptime_ms();
+        let mut proxy = SysProxy { inner: sys, launch: None, close: Vec::new(), usage: self.usage.clone(), lock: false };
+        let due = self.background_ticks(&mut proxy, now, true);
+        if now.saturating_sub(self.last_check) >= CHECK_MS {
+            self.check_resources(&mut proxy, now);
+        }
+        due.map(|d| d.saturating_sub(now) as u32)
+    }
+
     fn on_gesture(&mut self, g: Gesture, sys: &mut SysProxy, now: u64) {
         match g {
             Gesture::Home => {
@@ -803,10 +817,13 @@ impl Desktop {
         };
         let used = (stats.heap_used + stats.psram_used) / 1024;
         let total = (stats.heap_total + stats.psram_total) / 1024;
+        let battery = stats.battery_mv.map(|mv| format!("{}.{:02}V", mv / 1000, mv % 1000 / 10));
         let right = if r.w >= 800 {
-            format!("CPU {:>3.0}%   RAM {}K/{}K   {}", stats.cpu_load * 100.0, used, total, sys.net().status())
+            let battery = battery.map(|b| format!("   {b}")).unwrap_or_default();
+            format!("CPU {:>3.0}%   RAM {}K/{}K   {}{}", stats.cpu_load * 100.0, used, total, sys.net().status(), battery)
         } else {
-            format!("CPU {:.0}%  RAM {}M", stats.cpu_load * 100.0, used / 1024)
+            let battery = battery.map(|b| format!("  {b}")).unwrap_or_default();
+            format!("CPU {:.0}%  RAM {}M{}", stats.cpu_load * 100.0, used / 1024, battery)
         };
         let orientation = sys.orientation();
         let lockable = lock::is_configured(sys);
@@ -926,7 +943,7 @@ impl Desktop {
         canvas.fill_gradient(body, Color::hex(0x1b2a4a), Color::hex(0x0b0f18));
         let (f, text) = (self.fonts.body, self.theme.text);
         if page.group != launcher::MAIN {
-            let tf = self.fonts.title;
+            let tf = self.fonts.large;
             let w = tf.measure(page.group);
             let y = body.y + (launcher::TOP - tf.line_height) / 2 + 4;
             tf.draw(canvas, Point::new(body.x + (body.w - w) / 2, y), page.group, text);
@@ -1414,6 +1431,18 @@ mod tests {
     }
 
     #[test]
+    fn background_work_continues_without_frames() {
+        let mut r = Rig::new();
+        r.launch("calculator");
+        // Nothing to do in the background: no tick requested.
+        assert_eq!(r.d.background_step(&mut r.sys), None);
+        r.sys.heap[r.d.running[0].tag as usize] = (2048, 0);
+        r.sys.advance(1100);
+        r.d.background_step(&mut r.sys);
+        assert_eq!(r.d.app_usage()[0].sram, 2048, "resource checks still run");
+    }
+
+    #[test]
     fn gestures_can_be_disabled() {
         let mut r = Rig::new();
         r.launch("calculator");
@@ -1487,9 +1516,19 @@ mod tests {
 
     fn with_examples() -> Rig {
         let mut r = Rig::new();
-        r.d.register_group("Examples", &DEMOS);
+        r.d.register_group("Demos", &DEMOS);
         r.frame();
         r
+    }
+
+    #[test]
+    fn examples_have_their_own_page() {
+        let d = Desktop::new();
+        let pages = d.catalogue.pages(12);
+        let ex = pages.iter().find(|p| p.group == "Examples").expect("an Examples page");
+        let ids: Vec<&str> = ex.apps.iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["example-hello", "example-laps", "example-weather"]);
+        assert!(pages.iter().filter(|p| p.group == launcher::MAIN).all(|p| p.apps.iter().all(|a| !a.id.starts_with("example"))));
     }
 
     #[test]
