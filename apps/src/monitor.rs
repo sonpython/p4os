@@ -361,16 +361,17 @@ impl Monitor {
         ui.panel(r);
         let inner = r.inset(14);
         let (head, list) = inner.split_top(30);
-        let (body, small, bold) = (ui.fonts.body, ui.fonts.small, ui.fonts.bold);
-        // Name | CPU | SRAM | PSRAM | Close
-        let close_w = 86;
-        let num_w = ((inner.w - close_w) * 18 / 100).min(110);
-        let name_w = inner.w - close_w - 3 * num_w;
-        let col_x = [0, name_w, name_w + num_w, name_w + 2 * num_w];
+        let (body, small) = (ui.fonts.body, ui.fonts.small);
+        // Name | CPU | SRAM | PSRAM | Close; the numbers need room for
+        // "1023.9 KB" in the small font.
+        let close_w = 84;
+        let widths = [0, 56, 80, 80];
+        let name_w = inner.w - close_w - widths.iter().sum::<i32>();
+        let col_x = [0, name_w, name_w + widths[1], name_w + widths[1] + widths[2]];
+        let col_w = |i: usize| if i == 0 { name_w - 8 } else { widths[i] - 8 };
         for (i, title) in ["App", "CPU", "SRAM", "PSRAM"].iter().enumerate() {
             let align = if i == 0 { Align::Left } else { Align::Right };
-            let w = if i == 0 { name_w } else { num_w - 8 };
-            ui.text(Rect::new(head.x + col_x[i], head.y, w, head.h), title, &small, t.text_dim, align);
+            ui.text(Rect::new(head.x + col_x[i], head.y, col_w(i), head.h), title, &small, t.text_dim, align);
         }
         ui.canvas.fill_rect(Rect::new(head.x, head.bottom() - 1, head.w, 1), t.border);
         if self.apps.is_empty() {
@@ -387,11 +388,11 @@ impl Monitor {
                 continue;
             }
             let row = Rect::new(list.x, y, list.w, APP_ROW_H);
-            ui.text(Rect::new(row.x, y + 8, name_w - 8, 28), &a.name, &bold, t.text, Align::Left);
-            ui.text(Rect::new(row.x, y + 36, name_w - 8, 24), &state_text(a), &small, t.text_dim, Align::Left);
+            ui.text(Rect::new(row.x, y + 8, col_w(0), 28), &a.name, &body, t.text, Align::Left);
+            ui.text(Rect::new(row.x, y + 36, col_w(0), 24), &state_text(a), &small, t.text_dim, Align::Left);
             let vals = [fmt_cpu(a.cpu_permille), fmt_bytes(a.sram), fmt_bytes(a.psram)];
             for (k, v) in vals.iter().enumerate() {
-                let cell = Rect::new(row.x + col_x[k + 1], y, num_w - 8, APP_ROW_H);
+                let cell = Rect::new(row.x + col_x[k + 1], y, col_w(k + 1), APP_ROW_H);
                 ui.text(cell, v, &small, t.text, Align::Right);
             }
             let btn = Rect::new(row.right() - close_w + 6, y + 12, close_w - 6, APP_ROW_H - 24);
