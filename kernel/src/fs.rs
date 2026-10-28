@@ -12,7 +12,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use fatfs::{FileSystem, FsOptions, IoBase, Read, Seek, SeekFrom, Write};
+use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions, IoBase, Read, Seek, SeekFrom, Write};
 use p4os_sdk::{DirEntry, FileReader, FsError};
 
 /// Most sectors moved per card command when reading straight into the
@@ -47,9 +47,26 @@ pub struct SdDisk {
     pos: u64,
     cache: Vec<u8>,
     cache_lba: Option<u64>,
+    /// Whole sectors written back-to-back are collected here and sent as
+    /// one multi-block write: one command per sector is far slower because
+    /// every SD write command waits for the card's programming time.
+    pending: Vec<u8>,
+    pending_lba: u64,
 }
 
 impl SdDisk {
+    fn new(base: u64, size: u64) -> Self {
+        Self { base, size, pos: 0, cache: vec![0; BLOCK], cache_lba: None, pending: Vec::new(), pending_lba: 0 }
+    }
+
+    fn flush_pending(&mut self) -> Result<(), DiskError> {
+        if !self.pending.is_empty() {
+            sdmmc::write_blocks(self.base + self.pending_lba, &self.pending).map_err(DiskError::Sd)?;
+            self.pending.clear();
+        }
+        Ok(())
+    }
+
     fn load(&mut self, lba: u64) -> Result<(), DiskError> {
         if self.cache_lba != Some(lba) {
             sdmmc::read_blocks(self.base + lba, &mut self.cache).map_err(DiskError::Sd)?;
@@ -65,6 +82,7 @@ impl IoBase for SdDisk {
 
 impl Read for SdDisk {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, DiskError> {
+        self.flush_pending()?;
         let remaining = self.size.saturating_sub(self.pos) as usize;
         let len = buf.len().min(remaining);
         if len == 0 {
@@ -94,13 +112,20 @@ impl Write for SdDisk {
         let offset = (self.pos % BLOCK as u64) as usize;
         let n = if offset == 0 && buf.len() >= BLOCK {
             let n = (buf.len() / BLOCK).min(MAX_DIRECT_BLOCKS) * BLOCK;
-            sdmmc::write_blocks(self.base + lba, &buf[..n]).map_err(DiskError::Sd)?;
+            let pending_blocks = (self.pending.len() / BLOCK) as u64;
+            let contiguous = !self.pending.is_empty() && lba == self.pending_lba + pending_blocks;
+            if !contiguous || self.pending.len() + n > MAX_DIRECT_BLOCKS * BLOCK {
+                self.flush_pending()?;
+                self.pending_lba = lba;
+            }
+            self.pending.extend_from_slice(&buf[..n]);
             let blocks = (n / BLOCK) as u64;
             if self.cache_lba.is_some_and(|c| c >= lba && c < lba + blocks) {
                 self.cache_lba = None;
             }
             n
         } else {
+            self.flush_pending()?;
             self.load(lba)?;
             let n = (BLOCK - offset).min(buf.len());
             self.cache[offset..offset + n].copy_from_slice(&buf[..n]);
@@ -112,7 +137,7 @@ impl Write for SdDisk {
     }
 
     fn flush(&mut self) -> Result<(), DiskError> {
-        Ok(())
+        self.flush_pending()
     }
 }
 
@@ -157,10 +182,55 @@ pub fn mount() -> Result<(), String> {
     let mut s0 = vec![0u8; BLOCK];
     sdmmc::read_blocks(0, &mut s0).map_err(|e| alloc::format!("read: {:?}", e))?;
     let base = volume_start(&s0);
-    let disk = SdDisk { base, size: (blocks - base) * BLOCK as u64, pos: 0, cache: vec![0; BLOCK], cache_lba: None };
+    let disk = SdDisk::new(base, (blocks - base) * BLOCK as u64);
     let fs = FileSystem::new(disk, FsOptions::new()).map_err(|e| alloc::format!("fat: {:?}", e))?;
     crate::kprintln!("fs: FAT volume at sector {} ({:?})", base, fs.fat_type());
     *FS.lock() = Some(fs);
+    Ok(())
+}
+
+/// First sector of the FAT32 partition created by `format`: 1 MiB, the
+/// alignment SD cards and desktop systems expect.
+const PARTITION_START: u64 = 2048;
+/// Folders the built-in apps use.
+const STANDARD_DIRS: [&str; 7] = ["Music", "Pictures", "Documents", "Notes", "Paint", "Apps", "p4os"];
+
+/// Erase the card and create the p4os layout: an MBR with one FAT32 (LBA)
+/// partition at 1 MiB, volume label P4OS, and the standard folders.
+pub fn format() -> Result<(), String> {
+    // Drop the mounted filesystem first (flushes and releases the card).
+    *FS.lock() = None;
+    let blocks = sdmmc::init().map_err(|e| alloc::format!("card: {:?}", e))?;
+    let sectors = blocks - PARTITION_START;
+
+    let mut mbr = vec![0u8; BLOCK];
+    let entry = &mut mbr[446..462];
+    entry[0] = 0x00; // not bootable
+    entry[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]); // CHS unused (LBA only)
+    entry[4] = 0x0C; // FAT32 with LBA
+    entry[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]);
+    entry[8..12].copy_from_slice(&(PARTITION_START as u32).to_le_bytes());
+    entry[12..16].copy_from_slice(&(sectors as u32).to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+    sdmmc::write_blocks(0, &mbr).map_err(|e| alloc::format!("write MBR: {:?}", e))?;
+
+    let mut disk = SdDisk::new(PARTITION_START, sectors * BLOCK as u64);
+    let options = FormatVolumeOptions::new().fat_type(FatType::Fat32).bytes_per_cluster(32 * 1024).volume_label(*b"P4OS       ");
+    let t0 = crate::time::ticks();
+    fatfs::format_volume(&mut disk, options).map_err(|e| alloc::format!("format: {:?}", e))?;
+    disk.flush().map_err(|e| alloc::format!("flush: {:?}", e))?;
+    crate::kprintln!("fs: FAT32 structures written in {} ms", crate::time::ticks() - t0);
+
+    mount()?;
+    with_fs(|fs| {
+        for dir in STANDARD_DIRS {
+            fs.root_dir().create_dir(dir).map_err(map_err)?;
+        }
+        fs.flush().map_err(map_err)
+    })
+    .map_err(|e| alloc::format!("create folders: {:?}", e))?;
+    crate::kprintln!("fs: formatted {} MiB FAT32, folders: {:?}", sectors / 2048, STANDARD_DIRS);
     Ok(())
 }
 
@@ -238,7 +308,8 @@ impl p4os_sdk::FileSystem for SdFs {
             let mut f = fs.root_dir().create_file(rel).map_err(map_err)?;
             f.truncate().map_err(map_err)?;
             f.write_all(data).map_err(map_err)?;
-            f.flush().map_err(map_err)
+            f.flush().map_err(map_err)?;
+            fs.flush().map_err(map_err)
         })
     }
 
@@ -254,12 +325,18 @@ impl p4os_sdk::FileSystem for SdFs {
 
     fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
         let rel = sd_path(path)?;
-        with_fs(|fs| fs.root_dir().create_dir(rel).map(|_| ()).map_err(map_err))
+        with_fs(|fs| {
+            fs.root_dir().create_dir(rel).map_err(map_err)?;
+            fs.flush().map_err(map_err)
+        })
     }
 
     fn remove(&mut self, path: &str) -> Result<(), FsError> {
         let rel = sd_path(path)?;
-        with_fs(|fs| fs.root_dir().remove(rel).map_err(map_err))
+        with_fs(|fs| {
+            fs.root_dir().remove(rel).map_err(map_err)?;
+            fs.flush().map_err(map_err)
+        })
     }
 }
 

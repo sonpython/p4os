@@ -1,25 +1,31 @@
 //! Wall-clock time kept in software: a reference date plus the kernel tick.
 //! Set by the user (Settings) or later by the network. Lost on reset.
 
-use crate::{irq, time};
-use core::cell::UnsafeCell;
+use crate::spin::SpinLock;
+use crate::time;
 use p4os_sdk::DateTime;
 
-struct Base(UnsafeCell<Option<(i64, u32)>>);
-unsafe impl Sync for Base {}
-
 /// (unix seconds, kernel tick in ms) at the moment the clock was set.
-static BASE: Base = Base(UnsafeCell::new(None));
+static BASE: SpinLock<Option<(i64, u32)>> = SpinLock::new(None);
 
 pub fn set(t: DateTime) {
     let secs = to_unix(t);
-    irq::free(|| unsafe { *BASE.0.get() = Some((secs, time::ticks())) });
+    *BASE.lock() = Some((secs, time::ticks()));
+}
+
+/// Set the clock from Unix seconds (network time is UTC).
+pub fn set_unix(secs: i64) {
+    *BASE.lock() = Some((secs, time::ticks()));
+}
+
+/// Seconds since the Unix epoch, when the clock has been set.
+pub fn unix_now() -> Option<i64> {
+    let (secs, tick) = (*BASE.lock())?;
+    Some(secs + time::ticks().wrapping_sub(tick) as i64 / 1000)
 }
 
 pub fn now() -> Option<DateTime> {
-    let (secs, tick) = irq::free(|| unsafe { *BASE.0.get() })?;
-    let elapsed = time::ticks().wrapping_sub(tick) as i64 / 1000;
-    Some(from_unix(secs + elapsed))
+    unix_now().map(from_unix)
 }
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {

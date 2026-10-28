@@ -4,3 +4,5 @@
 # Local firmware dumps; the bundled fonts in gui/fonts are needed for builds.
 *.bin
 !gui/fonts/*.bin
+# Local agent worktrees and tool state
+/.claude/

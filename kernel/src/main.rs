@@ -10,9 +10,11 @@ mod backlight;
 mod boot;
 mod c6;
 mod clock;
+mod config;
 mod display;
 mod console;
 mod efuse;
+mod flash;
 mod fs;
 mod gpio;
 mod gui;
@@ -25,11 +27,14 @@ mod proto;
 mod pmp;
 mod psram;
 mod regi2c;
+mod rng;
 mod rtc;
 mod sched;
 mod sdmmc;
 mod shell;
+mod smp;
 mod soc;
+mod spin;
 mod sync;
 mod syscall;
 mod systimer;
@@ -39,6 +44,7 @@ mod trap;
 mod usermode;
 mod wdt;
 mod wifi;
+mod wifi_auto;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -87,7 +93,10 @@ extern "C" fn kmain() -> ! {
         Ok(size) => unsafe { heap::add_region(psram::BASE, size) },
         Err(e) => kprintln!("psram: init failed: {:?}", e),
     }
+    // Before core 1 starts: maps the flash slots holding user apps.
+    apploader::init();
     irq::init();
+    smp::init_ipi();
     time::init();
     console::init_rx();
     i2c::init();
@@ -95,6 +104,7 @@ extern "C" fn kmain() -> ! {
         kprintln!("fs: no SD card filesystem ({})", e);
     }
     time::resync();
+    config::init();
     irq::enable_global();
 
     time::sleep_ms(1000);
@@ -102,6 +112,8 @@ extern "C" fn kmain() -> ! {
     sched::spawn("shell", 2, 32 * 1024, shell::run, 0);
     audio::init();
     gui::start();
+    smp::start_core1();
+    wifi_auto::start_from_config();
     sched::start()
 }
 

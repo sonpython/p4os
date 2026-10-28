@@ -36,13 +36,36 @@ The ESP-IDF v5.5 bootloader leaves entries 0, 1, 2 and 15 **locked**
 | 2 | 0x4FC00000 + 128 KiB (mask ROM) | RX | reachable |
 | 15 | 0x50000000 + 1 MiB (HP peripherals) | RW | fenced by an unlocked no-access copy at a lower index |
 
-Static priority means entries 0..2 always win, so `f` = 3. **Known hole:** an
-app can read/write the CLIC and the cache controller and run ROM code, so it
-can still disturb the kernel (e.g. mask interrupts, drop dirty cache lines).
-Kernel SRAM, PSRAM, flash, TCM and all HP/LP peripherals fault. Closing the
-hole needs a boot path that does not lock those entries (own 2nd-stage
-loader), or running apps on core 1, whose PMP the bootloader never touches
-(to verify once SMP lands).
+Static priority means entries 0..2 always win on core 0. Core 1 never runs
+the bootloader and has **no locked entries** (`pmpcfg0..3 = 0`, read on the
+board with the shell `pmp` command). Apps are therefore pinned to core 1
+(`sched::spawn_on(Some(1), ...)`, chosen by `pmp::app_hart`, falling back to
+core 0 with the exposure above if core 1 is unusable). Measured on core 1
+(`run 1 N`): kernel SRAM, flash/rodata, kernel code, HP peripherals, the
+cache controller (0x3FF10000) and the ROM all fault and kill only the app.
+
+**Remaining hardware limit:** a U-mode access to the CPU subsystem window
+(0x20000000..0x30000000, CLIC/debug) is denied but raises **no exception**:
+core 1 stalls until reset (no further traps from it; the scheduler still
+charges the app on core 0's tick). An explicit no-access PMP entry for the
+window behaves the same. So an app cannot read or change the CLIC on core 1,
+but it can take core 1 down (`run 1 7`). Fixes would need a hardware
+watchdog for core 1 or a debugger-free way to recover it; not attempted.
+
+## SMP integration
+
+- Both harts zero `mscratch` at start (`_start`, `_start_hart1`); the U-mode
+  kernel-stack switch happens before the per-hart IRQ stack is selected.
+- `tp` is unused by the kernel, so only `gp` is reloaded on trap entry.
+- `sched::current_id()` reads the calling hart's current thread under the
+  scheduler lock; `exit_current()` is the normal thread exit.
+- `usermode::before_resume` runs on the hart doing the `mret` and programs
+  that hart's PMP; the plan (locked entries, fences) is computed per hart.
+- The app table is indexed by thread id and only touched by the thread
+  itself or the trap handler of the hart running it.
+- The flash MMU entries for the app slots are written once in `kmain`
+  before core 1 starts (`apploader::init`), since the MMU index/content
+  register pair is shared with `flash.rs`.
 
 ## Syscall ABI
 

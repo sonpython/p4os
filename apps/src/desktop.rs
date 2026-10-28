@@ -278,4 +278,13 @@ impl System for SysProxy<'_> {
     fn set_orientation(&mut self, o: Orientation) {
         self.inner.set_orientation(o)
     }
+    fn wifi_connect(&mut self, ssid: &str, password: &str) {
+        self.inner.wifi_connect(ssid, password)
+    }
+    fn config_get(&self, key: &str) -> Option<String> {
+        self.inner.config_get(key)
+    }
+    fn config_set(&mut self, key: &str, value: &str) {
+        self.inner.config_set(key, value)
+    }
 }

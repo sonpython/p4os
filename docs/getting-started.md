@@ -28,7 +28,8 @@ Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`)
    - tắt các watchdog;
    - nâng CPU từ 90 MHz lên 360 MHz;
    - bật CLIC và tick 1 kHz;
-   - khởi động scheduler với hai thread `shell` và `idle`.
+   - đánh thức core 1 (hart 1), log in `smp: hart 1 online`;
+   - khởi động scheduler. Cả hai core cùng lấy thread từ một hàng đợi; mỗi core có thread `idle0`/`idle1` riêng.
 
 Bố cục bộ nhớ nằm trong `kernel/link.x`. Bootloader bắt buộc có đúng hai segment flash, và segment 0 phải bắt đầu bằng `esp_app_desc_t`.
 
@@ -44,7 +45,7 @@ Có một camera Imou nhìn thẳng vào màn hình, dùng được qua `scripts
 | Chạm giả lập rồi chụp | `python3 scripts/board-ui.py "tap 80 132" "shot calculator"` |
 | Chỉnh ảnh camera qua ONVIF (độ sáng, tương phản) | `python3 scripts/cam_onvif.py get` / `set Brightness=35` |
 | Kiểm tra loa: phát âm thử và nghe bằng micro của camera | `python3 scripts/cam_audio.py 1000` |
-| Kết nối Wi-Fi bằng thông tin lưu trong `~/.config/p4os/wifi` (mật khẩu được che trong mọi output) | `python3 scripts/wifi-connect.py` |
+| Lưu mạng Wi-Fi trong `~/.config/p4os/wifi` vào board bằng `wifi save` rồi kết nối (mật khẩu được che trong mọi output) | `python3 scripts/wifi-connect.py` |
 
 Camera tự cân sáng nên bị cháy sáng khi panel hiện màu sáng. Vì vậy hãy dùng màu tối (khoảng 0x40) khi kiểm tra.
 
@@ -52,7 +53,24 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps`, `mem`, `demo`, `membench`, `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS`, `get http://...` (tải một URL), `apps` (liệt kê app user trong flash), `run SLOT [ARG]` (chạy một app user). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+
+## Cài đặt lưu trong flash
+
+Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
+
+| Vùng | Nội dung |
+|---|---|
+| `0x0..0x10000` | bootloader (`0x2000`), bảng phân vùng (`0x8000`) |
+| `0x10000..` | phân vùng `factory`: kernel, chạy thẳng từ flash qua cache |
+| `0x710000..0x720000` | 64 KiB đầu của phân vùng `storage`: cài đặt của kernel (`kernel/src/config.rs`) |
+| `0x720000..0x800000` | 14 slot app user, mỗi slot 64 KiB (`scripts/flash-app.sh`); kernel chỉ đọc |
+| `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
+
+- Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
+- Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
 
 ## App user (U-mode, cách ly bằng PMP)
 
@@ -65,8 +83,9 @@ App user là binary riêng, không link vào kernel. Kernel nạp app từ flash
 | Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
 | Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |
 
-- Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 4) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
-- Giới hạn đã biết: bootloader ESP-IDF khoá PMP entry 0–2, nên app vẫn chạm được CLIC, cache controller và ROM.
+- Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 7) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6, 8, 9) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
+- App luôn chạy trên core 1. Bootloader ESP-IDF khoá PMP entry 0–2 của core 0 (CLIC, cache controller, ROM vẫn chạm được từ U-mode), còn core 1 không bị khoá entry nào. Lệnh `pmp` in trạng thái PMP của từng core.
+- Giới hạn phần cứng: trên core 1, truy cập U-mode vào vùng CPU subsystem (0x20000000.., gồm CLIC) bị chặn nhưng **không sinh exception**, core 1 treo đến khi reset. **Đừng chạy `run 1 7`** khi người khác đang dùng board.
 - ABI syscall, định dạng image và cơ chế PMP: [plans/261028-1217-user-mode-apps/design.md](../plans/261028-1217-user-mode-apps/design.md).
 - Khi build trong git worktree, cargo gộp cả `.cargo/config.toml` của repo cha nên `-Tlink.x` bị lặp. Khi đó hãy build kernel với `RUSTFLAGS="-C link-arg=-Tlink.x"`.
 
@@ -82,6 +101,16 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - Khi `mret` sang một thread khác, `mcause` phải giữ bit ngắt và mã nguyên nhân của trap đang xử lý. Nếu không, đường ngắt đó kẹt ở trạng thái "đang phục vụ" và không bao giờ kích hoạt lại (xem `kernel/src/trap.rs`).
 - Thứ tự đổi bộ chia khi tăng xung là APB → SYS → MEM → CPU, sau đó mới chọn nguồn CPLL. Lý do: MEM_CLK phải ≤ 200 MHz và APB_CLK ≤ 100 MHz.
 
+## Đa lõi (SMP): những điều đã kiểm chứng
+
+- Cách đánh thức core 1 theo `start_other_core` của ESP-IDF v5.5: gỡ stall trong `PMU_CPU_SW_STALL` (mã 0xFF), bật `CORE1_CPU_CLK_EN` và gỡ `RST_EN_CORE1_GLOBAL` trong HP_SYS_CLKRST, rồi gọi hàm ROM `ets_set_appcpu_boot_addr` (0x4FC000A8) với địa chỉ `_start_hart1` (`kernel/src/smp.rs`).
+- Lúc nhảy vào kernel, ROM chạy core 1 trên stack riêng ngay dưới 0x4FF3EFC0. Vùng này nằm trên `_heap_end`, nên heap không bị ghi đè.
+- CLIC của từng core nằm ở cùng địa chỉ 0x20800000, và mỗi core có ma trận ngắt riêng. `irq::attach` gắn ngắt vào core đang gọi. Tick 1 kHz chạy trên core 0 và tính giờ cho cả hai core.
+- Ngắt liên core (IPI) dùng nguồn FROM_CPU 79 + hart. Ghi 1 vào `HP_SYS + 0x10 + 4·hart` để báo, bên nhận ghi 0 để xoá.
+- Scheduler, heap, `Semaphore`/`Mutex`, console và thao tác cache dùng spinlock (`kernel/src/spin.rs`): tắt ngắt trên core hiện tại rồi chờ một atomic LR/SC. `irq::free` chỉ chặn được core hiện tại. Spinlock phải là biến static trong SRAM.
+- `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
+- `smpdemo` đo được 1 thread 1111 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 1,99 lần.
+
 ## Màn hình: những điều đã kiểm chứng
 
 - Panel là ST7701S 480×800, dùng 2 lane ở 500 Mbps, xung pixel 30 MHz (PLL_F240M/8). Timing H 12/42/42, V 2/8/166. Bảng lệnh khởi tạo nằm trong `kernel/src/display.rs`.
@@ -96,6 +125,15 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 | Âm thanh (I2S1 → ES8311 → loa, PA ở GPIO11) | DMA, I2S và codec chạy, đã kiểm chứng bằng thanh ghi | Chưa gắn loa nên chưa nghe thử được. |
 | Đèn nền | PWM 20 kHz qua LEDC trên GPIO23 | Thanh độ sáng trong Settings điều khiển trực tiếp. |
 | Cảm ứng GT911 (I2C 0x5D) | Driver và cách ánh xạ toạ độ đã có | Chưa kiểm chứng bằng chạm thật. |
-| Wi-Fi (ESP32-C6 qua ESP-Hosted v2, SDIO) | Chạy: kết nối WPA2, DHCP, DNS, TCP, HTTP/1.0 (smoltcp). App Browser tải được trang `http://` trên board | Lúc nhận dạng thẻ phải giữ D3 (GPIO17) ở mức cao như GPIO thường. Host báo sẵn sàng bằng cách ghi `0x01` vào SCRATCH_7 (0x08C). Mỗi lần CMD53 phải đọc **đúng** số byte đang chờ, đọc dư sẽ làm C6 ngừng trả lời. Firmware slave v2.3.x cần gửi đủ `threshold` và `pmf_cfg` trong cấu hình STA, nếu thiếu C6 sẽ treo. Chưa hỗ trợ HTTPS (chưa có TLS) và chưa có BLE. |
+| Wi-Fi (ESP32-C6 qua ESP-Hosted v2, SDIO) | Chạy: kết nối WPA2, DHCP, DNS, SNTP, TCP, HTTP/1.0 (smoltcp) và HTTPS. App Browser tải được trang `http://` và `https://` trên board | Lúc nhận dạng thẻ phải giữ D3 (GPIO17) ở mức cao như GPIO thường. Host báo sẵn sàng bằng cách ghi `0x01` vào SCRATCH_7 (0x08C). Mỗi lần CMD53 phải đọc **đúng** số byte đang chờ, đọc dư sẽ làm C6 ngừng trả lời. Firmware slave v2.3.x cần gửi đủ `threshold` và `pmf_cfg` trong cấu hình STA, nếu thiếu C6 sẽ treo. Chưa có BLE. |
 
 Một bẫy với systimer: comparator chỉ kích hoạt khi bộ đếm **bằng** giá trị đích. Nếu deadline đã trôi qua lúc ngắt đang tắt, tick sẽ dừng vĩnh viễn. `time::arm_after` xử lý trường hợp này bằng cách bỏ qua các chu kỳ bị lỡ và cộng bù số tick.
+
+## HTTPS
+
+- Dùng rustls 0.23 (`no_std`, API unbuffered) với bộ mã hoá thuần Rust `rustls-rustcrypto`. Hỗ trợ TLS 1.3 và TLS 1.2 (ECDHE, AES-GCM, ChaCha20). Phần logic HTTP, SNTP và TLS nằm trong crate `net/` (`p4os-net`), dùng chung cho kernel và simulator.
+- Chứng chỉ được **kiểm tra thật** với kho CA gốc của Mozilla (`webpki-roots`). Chứng chỉ hết hạn, sai tên miền hoặc tự ký đều bị từ chối, Browser báo "Secure connection failed".
+- Kiểm tra hạn chứng chỉ cần giờ đúng. Sau DHCP, kernel hỏi SNTP (`pool.ntp.org`, rồi `time.cloudflare.com`, `time.google.com`) và đặt đồng hồ theo **UTC**. Yêu cầu HTTPS trong 15 giây đầu sẽ chờ có giờ. Nếu SNTP không trả lời, HTTPS báo lỗi "clock not set" (có thể đặt giờ trong Settings).
+- Số ngẫu nhiên lấy từ thanh ghi RNG `0x5011_01A4`, trộn với bộ đếm chu kỳ qua SHA-256 (`kernel/src/rng.rs`). Lúc chạy, nguồn nhiễu SAR ADC không bật, nên entropy chỉ đến từ dao động RC.
+- Đo trên board (360 MHz): handshake TLS 1.3 mất 0,25–0,9 giây, TLS 1.2 với RSA-4096 hoặc ECDSA P-384 mất 1,1–1,6 giây. Một lần tải HTTPS dùng thêm khoảng 45 KB SRAM lúc cao nhất. Stack của thread `net` dùng khoảng 16 KB trên 48 KB. Image firmware tăng từ 1,2 MB lên 2,4 MB (phân vùng `factory` có 7 MB).
+- Giới hạn: không có session resumption và keep-alive, nên mỗi lần tải là một handshake mới. Phản hồi được đọc trọn vào RAM. Simulator cũng hỗ trợ HTTPS qua cùng crate.

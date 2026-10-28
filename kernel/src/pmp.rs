@@ -20,12 +20,18 @@
 //! entries *before* them win regardless; [`check`] reports them once.
 //!
 //! The plan is computed per hart from that hart's CSRs, because PMP state
-//! is per hart and core 1 does not run the bootloader.
+//! is per hart. Core 1 never runs the bootloader: all its entries are
+//! unlocked (`pmpcfg0..3 = 0`, measured), so apps are pinned there
+//! ([`app_hart`]) and reach nothing but their own memory. Measured on core 1:
+//! loads from the cache controller and ROM fault as expected, but a U-mode
+//! access to the CPU subsystem window (0x2000_0000.., CLIC) raises no
+//! exception and stalls the core until reset, with or without an explicit
+//! no-access entry. That is a hardware limit PMP cannot fix.
 
-use crate::{irq, kprintln};
+use crate::{irq, kprintln, sched};
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 const ENTRIES: usize = 16;
 const R: u32 = 1 << 0;
@@ -38,8 +44,7 @@ const A_NA4: u32 = 2 << 3;
 const A_NAPOT: u32 = 3 << 3;
 const L: u32 = 1 << 7;
 const MISA_U: u32 = 1 << 20;
-const HARTS: usize = 2;
-
+const HARTS: usize = irq::HART_COUNT;
 macro_rules! pmpaddr_access {
     ($($n:literal),*) => {
         fn read_addr(i: usize) -> u32 {
@@ -167,34 +172,98 @@ fn with_plan<T>(f: impl FnOnce(Result<&Plan, &'static str>) -> T) -> T {
     })
 }
 
-static REPORTED: AtomicBool = AtomicBool::new(false);
+/// What a hart's PMP allows for apps, found by [`survey`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Isolation {
+    /// Only the app's own memory is reachable from U-mode.
+    Full,
+    /// Locked entries ahead of the app entries stay reachable.
+    Partial,
+    Unusable,
+}
 
-/// Can this hart confine U-mode code? Reports once which locked entries
-/// remain reachable from apps.
-pub fn check() -> Result<(), &'static str> {
+const UNKNOWN: u8 = 0;
+static VERDICT: [AtomicU8; HARTS] = [const { AtomicU8::new(UNKNOWN) }; HARTS];
+const PROBE_NAMES: [&str; HARTS] = ["pmp-probe0", "pmp-probe1"];
+const PROBE_PRIORITY: u8 = 5;
+
+fn encode(v: Isolation) -> u8 {
+    v as u8 + 1
+}
+
+fn decode_verdict(v: u8) -> Option<Isolation> {
+    [Isolation::Full, Isolation::Partial, Isolation::Unusable].get((v as usize).wrapping_sub(1)).copied()
+}
+
+/// Inspect the calling hart: log its PMP lock state, record the verdict.
+fn probe_this_hart() {
+    let hart = irq::hart_id();
     let misa: u32;
     unsafe { asm!("csrr {0}, misa", out(reg) misa, options(nostack)) };
-    if misa & MISA_U == 0 {
-        return Err("the CPU has no user mode");
-    }
-    let first = with_plan(|p| p.map(|p| p.first))?;
-    if !REPORTED.swap(true, Ordering::Relaxed) {
-        let cfg = read_cfg();
-        for i in 0..first {
-            let c = cfg_byte(&cfg, i);
-            if c & (R | W | X) != 0 && c & A_MASK != A_OFF {
-                let (lo, size) = decode(c & A_MASK, read_addr(i));
-                kprintln!(
-                    "pmp: locked entry {} ({:#010x}+{:#x} {}{}{}) stays reachable from apps",
-                    i, lo, size,
-                    if c & R != 0 { "r" } else { "-" },
-                    if c & W != 0 { "w" } else { "-" },
-                    if c & X != 0 { "x" } else { "-" },
-                );
+    let cfg = read_cfg();
+    kprintln!("pmp: hart {} pmpcfg0..3 = {:#010x} {:#010x} {:#010x} {:#010x}", hart, cfg[0], cfg[1], cfg[2], cfg[3]);
+    let verdict = if misa & MISA_U == 0 {
+        kprintln!("pmp: hart {}: no user mode", hart);
+        Isolation::Unusable
+    } else {
+        match with_plan(|p| p.map(|p| p.first)) {
+            Err(e) => {
+                kprintln!("pmp: hart {}: {}", hart, e);
+                Isolation::Unusable
+            }
+            Ok(first) => {
+                let mut exposed = false;
+                for i in 0..first {
+                    let c = cfg_byte(&cfg, i);
+                    if c & (R | W | X) != 0 && c & A_MASK != A_OFF {
+                        exposed = true;
+                        let (lo, size) = decode(c & A_MASK, read_addr(i));
+                        kprintln!(
+                            "pmp: hart {}: locked entry {} ({:#010x}+{:#x} {}{}{}) stays reachable from apps",
+                            hart, i, lo, size,
+                            if c & R != 0 { "r" } else { "-" },
+                            if c & W != 0 { "w" } else { "-" },
+                            if c & X != 0 { "x" } else { "-" },
+                        );
+                    }
+                }
+                if exposed { Isolation::Partial } else { Isolation::Full }
             }
         }
+    };
+    VERDICT[hart].store(encode(verdict), Ordering::Release);
+}
+
+fn probe_thread(_: usize) {
+    probe_this_hart();
+}
+
+/// Verdict per hart. Each online hart is probed once by a short thread
+/// pinned to it, since PMP CSRs are per hart.
+pub fn survey() -> [Option<Isolation>; HARTS] {
+    for hart in 0..HARTS {
+        if VERDICT[hart].load(Ordering::Acquire) != UNKNOWN || !sched::is_online(hart) {
+            continue;
+        }
+        sched::spawn_on(Some(hart), PROBE_NAMES[hart], PROBE_PRIORITY, 2048, probe_thread, 0);
+        for _ in 0..100 {
+            if VERDICT[hart].load(Ordering::Acquire) != UNKNOWN {
+                break;
+            }
+            sched::sleep_ms(2);
+        }
     }
-    Ok(())
+    core::array::from_fn(|h| decode_verdict(VERDICT[h].load(Ordering::Acquire)))
+}
+
+/// The core user apps are pinned to: one with full isolation if any, else
+/// one with partial isolation.
+pub fn app_hart() -> Result<usize, &'static str> {
+    let verdicts = survey();
+    [Isolation::Full, Isolation::Partial]
+        .iter()
+        .find_map(|want| verdicts.iter().position(|v| *v == Some(*want)))
+        .ok_or("no core can confine user mode")
 }
 
 /// Range of a NAPOT/NA4 entry as (base, size); TOR is shown as its top.
@@ -215,8 +284,8 @@ fn decode(mode: u32, addr: u32) -> (usize, usize) {
 pub fn enter_app(base: usize, rx_end: usize, end: usize) {
     let ok = with_plan(|plan| plan.map(|p| p.apply(base, rx_end, end)));
     if let Err(e) = ok {
-        // `check` passed on the hart that loaded the app; another hart
-        // with a different lock state would land here.
+        // Apps are pinned to a hart `app_hart` found usable, so this
+        // only happens if a pinned app resumed somewhere else.
         kprintln!("*** cannot isolate user mode on hart {}: {}", irq::hart_id(), e);
         crate::halt()
     }

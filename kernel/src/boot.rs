@@ -1,7 +1,8 @@
 //! Reset entry and machine-mode trap entry.
 //!
 //! The 2nd-stage bootloader jumps to `_start` on HP core 0 in M-mode, with
-//! interrupts off and its own stack still in use. Core 1 stays parked in ROM.
+//! interrupts off and its own stack still in use. Core 1 stays parked in ROM
+//! until `smp::start_core1` hands it `_start_hart1`.
 //!
 //! Traps from user apps (U-mode) are entered on the thread's kernel stack
 //! taken from `mscratch`; see `usermode.rs` for the protocol.
@@ -10,6 +11,8 @@ use core::arch::global_asm;
 
 global_asm!(
     ".equ FRAME_SIZE, 144",
+    /* Must match IRQ_STACK_SIZE in link.x (checked there). */
+    ".equ IRQ_STACK_SHIFT, 13",
     r#"
     .section .text.start, "ax"
     .global _start
@@ -44,6 +47,29 @@ _start:
 3:  wfi
     j 3b
 
+    /* Core 1 entry, jumped to by the ROM. bss is already cleared and the
+       caches and MMU are shared with core 0, so only per-core CPU state
+       needs setting up. */
+    .balign 4
+    .global _start_hart1
+_start_hart1:
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+    csrci mstatus, 0x8
+    csrw mscratch, zero
+    la sp, _stack1_top
+    li t0, 0x2000
+    csrs mstatus, t0
+    fscsr zero
+    la t0, _trap_vector
+    ori t0, t0, 3
+    csrw mtvec, t0
+    call kmain_hart1
+4:  wfi
+    j 4b
+
     .section .trap_vector, "ax"
     .balign 64
     .global _trap_vector
@@ -52,9 +78,9 @@ _trap_vector:
        in M-mode it is 0. Swap, and swap back if we came from M-mode, so a
        trap from U-mode never stores through the untrusted user sp. */
     csrrw sp, mscratch, sp
-    bnez sp, 4f
+    bnez sp, 10f
     csrrw sp, mscratch, sp
-4:
+10:
     addi sp, sp, -FRAME_SIZE
     sw x1, 0(sp)
     sw x3, 8(sp)
@@ -92,9 +118,9 @@ _trap_vector:
     csrr t1, mcause
     srli t1, t1, 28
     andi t1, t1, 3
-    beqz t1, 5f
+    beqz t1, 11f
     addi t0, sp, FRAME_SIZE
-5:  sw t0, 4(sp)
+11: sw t0, 4(sp)
     csrr t0, mepc
     sw t0, 124(sp)
     csrr t0, mcause
@@ -113,9 +139,13 @@ _trap_vector:
     .option pop
 
     mv a0, sp
-    /* Handlers run on a dedicated stack so thread stacks only need room
-       for one saved frame on top of their own usage. Traps never nest. */
+    /* Handlers run on a dedicated per-core stack so thread stacks only
+       need room for one saved frame on top of their own usage. Traps never
+       nest. Hart h uses the h-th stack down from _irq_stack_top. */
+    csrr t0, mhartid
+    slli t0, t0, IRQ_STACK_SHIFT
     la sp, _irq_stack_top
+    sub sp, sp, t0
     call trap_handler
     mv sp, a0
 
@@ -129,10 +159,10 @@ _trap_vector:
        top, where its next trap frame goes, in mscratch. */
     srli t1, t0, 28
     andi t1, t1, 3
-    bnez t1, 6f
+    bnez t1, 12f
     addi t1, sp, FRAME_SIZE
     csrw mscratch, t1
-6:
+12:
     lw t0, 124(sp)
     csrw mepc, t0
     lw x1, 0(sp)

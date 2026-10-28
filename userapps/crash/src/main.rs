@@ -11,10 +11,15 @@
 //! | 4   | store into the app's own code             | store fault     |
 //! | 5   | load kernel rodata (flash window)         | load fault      |
 //! | 6   | hand a kernel pointer to `write`          | EFAULT, exit 0  |
+//! | 7   | load from the interrupt controller (CLIC) | stalls core 1, see below |
+//! | 8   | load from the cache controller            | load fault      |
+//! | 9   | load from the mask ROM                    | load fault      |
 //!
-//! Not tested because they are known to be reachable: the ranges of PMP
-//! entries the bootloader locks ahead of the app entries (CPU subsystem with
-//! the CLIC, CPU peripherals, mask ROM); see kernel/src/pmp.rs.
+//! Apps run on core 1, whose PMP the bootloader leaves unlocked (shell
+//! `pmp`). Tests 8 and 9 only fault there. Test 7 shows a hardware limit: a
+//! U-mode access to the CPU subsystem window (0x2000_0000..0x3000_0000) is
+//! denied but raises no exception, and core 1 stays stalled until reset.
+//! Do not run it on a board others are using.
 
 #![no_std]
 #![no_main]
@@ -31,6 +36,12 @@ const GPIO_OUT_W1TS: usize = 0x500E_0008;
 const KERNEL_TEXT: usize = 0x4100_0040;
 /// Kernel read-only data (app descriptor) in the flash-mapped window.
 const KERNEL_RODATA: usize = 0x4000_0020;
+/// CLIC, in the CPU subsystem range.
+const CLIC_BASE: usize = 0x2080_0000;
+/// L1/L2 cache controller registers (CPU peripherals).
+const CACHE_CTRL: usize = 0x3FF1_0000;
+/// Mask ROM.
+const ROM: usize = 0x4FC0_0000;
 
 fn main(arg: u32) -> i32 {
     println!("crash test {}: about to break isolation", arg);
@@ -53,6 +64,9 @@ fn main(arg: u32) -> i32 {
                 println!("write(kernel pointer) = {} (expected {})", r, err::EFAULT);
                 return if r == err::EFAULT { 0 } else { 1 };
             }
+            7 => println!("read {:#x}", (CLIC_BASE as *const u32).read_volatile()),
+            8 => println!("read {:#x}", (CACHE_CTRL as *const u32).read_volatile()),
+            9 => println!("read {:#x}", (ROM as *const u32).read_volatile()),
             _ => {
                 println!("unknown test");
                 return 2;

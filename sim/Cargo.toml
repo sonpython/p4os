@@ -9,4 +9,5 @@ description = "Host simulator for the p4os desktop: scripted input, PNG screensh
 p4os-sdk = { path = "../sdk" }
 p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
+p4os-net = { path = "../net" }
 png = "0.17"

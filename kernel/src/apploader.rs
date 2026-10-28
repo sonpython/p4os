@@ -69,20 +69,27 @@ impl From<ImageError> for LoadError {
 
 static MAPPED: AtomicBool = AtomicBool::new(false);
 
+/// Map the app slots. Call once during boot, before core 1 starts: the
+/// MMU index/content register pair is shared state (`flash.rs` walks it
+/// too), so it is not rewritten at run time.
+pub fn init() {
+    irq::free(|| {
+        for page in 0..SLOTS {
+            mmio::write(FLASH_MMU_ITEM_INDEX, (MAP_FIRST_ENTRY + page) as u32);
+            mmio::write(FLASH_MMU_ITEM_CONTENT, FLASH_MMU_VALID | ((FLASH_BASE / MMU_PAGE + page) as u32));
+        }
+    });
+    MAPPED.store(true, Ordering::Release);
+}
+
 /// The raw contents of `slot`, read through the flash cache.
 fn slot_bytes(slot: usize) -> Result<&'static [u8], LoadError> {
     if slot >= SLOTS {
         return Err(LoadError::NoSuchSlot);
     }
-    irq::free(|| {
-        if !MAPPED.load(Ordering::Relaxed) {
-            for page in 0..SLOTS {
-                mmio::write(FLASH_MMU_ITEM_INDEX, (MAP_FIRST_ENTRY + page) as u32);
-                mmio::write(FLASH_MMU_ITEM_CONTENT, FLASH_MMU_VALID | ((FLASH_BASE / MMU_PAGE + page) as u32));
-            }
-            MAPPED.store(true, Ordering::Relaxed);
-        }
-    });
+    if !MAPPED.load(Ordering::Acquire) {
+        return Err(LoadError::Unsupported("app slots not mapped"));
+    }
     let addr = MAP_VADDR + slot * SLOT_SIZE;
     // Drop anything cached for this window, e.g. from before a reflash.
     psram::cache_invalidate(addr, SLOT_SIZE);
@@ -121,7 +128,7 @@ pub fn list() {
 /// Load the app in `slot` into fresh RAM and start it with `arg` in a0.
 pub fn run(slot: usize, arg: u32) -> Result<(usize, Arc<AppStatus>), LoadError> {
     let image = Image::parse(slot_bytes(slot)?)?;
-    pmp::check().map_err(LoadError::Unsupported)?;
+    let hart = pmp::app_hart().map_err(LoadError::Unsupported)?;
     let h = image.header;
 
     let mut region = Region::alloc(h.ram_size() as usize).ok_or(LoadError::OutOfMemory)?;
@@ -137,9 +144,10 @@ pub fn run(slot: usize, arg: u32) -> Result<(usize, Arc<AppStatus>), LoadError> 
     sync_code(base as usize, h.rx_size as usize);
 
     let app = UserApp::new(String::from(h.name()), region, h.rx_size as usize, h.entry as usize, arg);
-    let (id, status) = usermode::spawn(THREAD_NAMES[slot], app);
-    kprintln!("app '{}' started as thread {} at {:#010x} ({} bytes RAM)", h.name(), id, base, h.ram_size());
-    Ok((id, status))
+    // Logged before the start: the app runs on another core and would
+    // interleave its own output with this line.
+    kprintln!("app '{}': core {}, {} bytes RAM at {:#010x}", h.name(), hart, h.ram_size(), base);
+    Ok(usermode::spawn(hart, THREAD_NAMES[slot], app))
 }
 
 /// Make freshly written code visible to instruction fetch: write the data

@@ -1,17 +1,24 @@
-//! Preemptive priority scheduler (single core).
+//! Preemptive priority scheduler for both HP cores.
 //!
 //! Every thread owns a stack. On any trap the interrupted context is pushed
 //! onto the current thread's stack (see `boot.rs`); switching threads means
 //! returning a different thread's saved frame pointer to the trap exit path.
 //!
-//! Policy: the highest-priority ready thread runs; equal priorities share
-//! the core round-robin with a fixed time slice. All scheduler state is only
-//! touched with interrupts masked (trap context or `irq::free`).
+//! Both cores pick from one thread table guarded by one spinlock. Each core
+//! has its own current thread and its own idle thread, and a thread may be
+//! pinned to one core (`spawn_on`). Policy: each core runs the
+//! highest-priority ready thread allowed on it that the other core is not
+//! running; equal priorities share the cores round-robin with a fixed time
+//! slice. When a thread becomes ready, the core running the lowest-priority
+//! thread it outranks is told to reschedule, through an inter-processor
+//! interrupt if that is the other core. The tick runs on core 0 only and
+//! accounts time for both cores.
 
 use crate::boot::TrapFrame;
-use crate::{irq, kprintln, time};
+use crate::irq::{self, HART_COUNT};
+use crate::spin::SpinLock;
+use crate::{kprintln, smp, time};
 use core::arch::asm;
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub const MAX_THREADS: usize = 16;
@@ -19,6 +26,7 @@ pub const PRIORITY_IDLE: u8 = 0;
 const TIME_SLICE_TICKS: u32 = 10;
 const STACK_CANARY: u32 = 0xDEAD_C0DE;
 const STACK_FILL: u32 = 0xA5A5_A5A5;
+const IDLE_NAMES: [&str; HART_COUNT] = ["idle0", "idle1"];
 
 const MSTATUS_MPP_M: u32 = 3 << 11;
 const MSTATUS_MPIE: u32 = 1 << 7;
@@ -54,28 +62,55 @@ pub struct Thread {
     fp: [u32; 33],
     pub run_ticks: u32,
     slice_used: u32,
+    /// Core the thread is pinned to, or `None` to run anywhere.
+    affinity: Option<usize>,
+    /// Core executing the thread right now. Its stack and saved frame belong
+    /// to that core until it switches away.
+    on_cpu: Option<usize>,
+    /// Core that ran the thread most recently.
+    last_cpu: Option<usize>,
+}
+
+impl Thread {
+    fn allowed_on(&self, hart: usize) -> bool {
+        self.affinity.is_none_or(|a| a == hart)
+    }
 }
 
 struct Scheduler {
     threads: [Option<Thread>; MAX_THREADS],
-    current: Option<usize>,
+    current: [Option<usize>; HART_COUNT],
 }
 
-struct Global(UnsafeCell<Scheduler>);
-unsafe impl Sync for Global {}
+// Thread stacks and frames are only reached through the scheduler lock.
+unsafe impl Send for Scheduler {}
 
-static SCHED: Global = Global(UnsafeCell::new(Scheduler {
+static SCHED: SpinLock<Scheduler> = SpinLock::new(Scheduler {
     threads: [const { None }; MAX_THREADS],
-    current: None,
-}));
+    current: [None; HART_COUNT],
+});
 
-/// Only call with interrupts masked.
-fn sched() -> &'static mut Scheduler {
-    unsafe { &mut *SCHED.0.get() }
+static ONLINE: [AtomicBool; HART_COUNT] = [const { AtomicBool::new(false) }; HART_COUNT];
+static NEED_RESCHED: [AtomicBool; HART_COUNT] = [const { AtomicBool::new(false) }; HART_COUNT];
+static IDLE_TICKS: [AtomicU32; HART_COUNT] = [const { AtomicU32::new(0) }; HART_COUNT];
+static LOAD_PERMILLE: [AtomicU32; HART_COUNT] = [const { AtomicU32::new(0) }; HART_COUNT];
+
+/// Create a thread that runs `entry(arg)` on any core.
+pub fn spawn(name: &'static str, priority: u8, stack_size: usize, entry: fn(usize), arg: usize) -> usize {
+    spawn_on(None, name, priority, stack_size, entry, arg)
 }
 
-/// Create a thread that runs `entry(arg)` on a freshly allocated stack.
-pub fn spawn(name: &'static str, priority: u8, stack_size: usize, entry: fn(usize), arg: usize) -> usize {
+/// Create a thread that runs `entry(arg)` on a freshly allocated stack,
+/// pinned to core `affinity` if given.
+pub fn spawn_on(
+    affinity: Option<usize>,
+    name: &'static str,
+    priority: u8,
+    stack_size: usize,
+    entry: fn(usize),
+    arg: usize,
+) -> usize {
+    assert!(affinity.is_none_or(|a| a < HART_COUNT), "no such core");
     let stack_size = stack_size & !15;
     let mut stack_mem = alloc::vec![STACK_FILL; stack_size / 4].into_boxed_slice();
     stack_mem[0] = STACK_CANARY;
@@ -99,9 +134,11 @@ pub fn spawn(name: &'static str, priority: u8, stack_size: usize, entry: fn(usiz
         f.mcause = MCAUSE_MPP_M | MCAUSE_MPIE;
     }
 
-    let reaped = irq::free(|| {
-        let s = sched();
-        let reaped = reap_exited(s);
+    // Allocated up front so reaping does not allocate under the lock.
+    let mut dead = alloc::vec::Vec::with_capacity(MAX_THREADS);
+    let slot = {
+        let mut s = SCHED.lock();
+        reap_exited(&mut s, &mut dead);
         let slot = s.threads.iter().position(Option::is_none).expect("thread table full");
         s.threads[slot] = Some(Thread {
             _stack: stack_mem,
@@ -114,24 +151,26 @@ pub fn spawn(name: &'static str, priority: u8, stack_size: usize, entry: fn(usiz
             fp: [0; 33],
             run_ticks: 0,
             slice_used: 0,
+            affinity,
+            on_cpu: None,
+            last_cpu: None,
         });
-        (slot, reaped)
-    });
+        kick(&s, priority, affinity);
+        slot
+    };
     // Free the dead stacks outside the critical section.
-    drop(reaped.1);
-    reaped.0
+    drop(dead);
+    slot
 }
 
-/// Detach exited threads (other than the running one, whose stack is still
-/// in use) and return them so the caller can free their stacks.
-fn reap_exited(s: &mut Scheduler) -> alloc::vec::Vec<Thread> {
-    let mut dead = alloc::vec::Vec::new();
-    for (i, slot) in s.threads.iter_mut().enumerate() {
-        if s.current != Some(i) && slot.as_ref().is_some_and(|t| t.state == State::Exited) {
+/// Detach exited threads that no core is still running on and move them
+/// into `dead` so the caller can free their stacks.
+fn reap_exited(s: &mut Scheduler, dead: &mut alloc::vec::Vec<Thread>) {
+    for slot in s.threads.iter_mut() {
+        if slot.as_ref().is_some_and(|t| t.state == State::Exited && t.on_cpu.is_none()) {
             dead.push(slot.take().unwrap());
         }
     }
-    dead
 }
 
 extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
@@ -140,9 +179,10 @@ extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
     thread_exit()
 }
 
-/// Id of the thread running on this core, if the scheduler has started.
+/// Id of the thread running on the calling core, if the scheduler has
+/// started there.
 pub fn current_id() -> Option<usize> {
-    irq::free(|| sched().current)
+    SCHED.lock().current[irq::hart_id()]
 }
 
 /// End the calling thread (as if its entry function had returned).
@@ -151,22 +191,33 @@ pub fn exit_current() -> ! {
 }
 
 extern "C" fn thread_exit() -> ! {
-    irq::free(|| {
-        let s = sched();
-        if let Some(t) = s.current.and_then(|i| s.threads[i].as_mut()) {
-            t.state = State::Exited;
-        }
-    });
+    if let Some(t) = current_mut(&mut SCHED.lock()) {
+        t.state = State::Exited;
+    }
     yield_now();
     unreachable!("exited thread was scheduled again")
 }
 
-/// Hand the core to the scheduler. Never returns to the boot stack.
+/// The thread running on the calling core. Interrupts are masked while the
+/// lock is held, so the core cannot change under the caller.
+fn current_mut(s: &mut Scheduler) -> Option<&mut Thread> {
+    let cur = s.current[irq::hart_id()]?;
+    s.threads[cur].as_mut()
+}
+
+/// Hand the calling core to the scheduler. Never returns to the boot stack.
 pub fn start() -> ! {
-    spawn("idle", PRIORITY_IDLE, 2048, idle, 0);
+    let hart = irq::hart_id();
+    spawn_on(Some(hart), IDLE_NAMES[hart], PRIORITY_IDLE, 2048, idle, 0);
+    ONLINE[hart].store(true, Ordering::Release);
     irq::enable_global();
     yield_now();
     unreachable!("boot context resumed")
+}
+
+/// Whether `hart` has entered the scheduler.
+pub fn is_online(hart: usize) -> bool {
+    ONLINE[hart].load(Ordering::Acquire)
 }
 
 fn idle(_: usize) {
@@ -180,117 +231,205 @@ pub fn yield_now() {
 }
 
 pub fn sleep_ms(ms: u32) {
-    irq::free(|| {
-        let s = sched();
-        let cur = s.current.expect("sleep outside a thread");
-        s.threads[cur].as_mut().unwrap().state = State::Sleeping { until: time::ticks().wrapping_add(ms) };
-    });
+    {
+        let mut s = SCHED.lock();
+        let t = current_mut(&mut s).expect("sleep outside a thread");
+        t.state = State::Sleeping { until: time::ticks().wrapping_add(ms) };
+    }
     yield_now();
 }
 
-/// Mark the current thread blocked and return its id. Must be called with
-/// interrupts masked, in the same critical section that registered the
-/// thread as a waiter; the caller then calls `yield_now` to switch away.
-pub fn mark_current_blocked() -> usize {
-    let s = sched();
-    let cur = s.current.expect("block outside a thread");
+/// Blocking primitives build on `block_unless` and `wake`. Their own state
+/// is protected by the scheduler lock, which both run the closure under.
+///
+/// `block_unless` calls `try_take`. If that fails, `add_waiter(current
+/// thread id)` runs and the thread is marked blocked in the same critical
+/// section, so a concurrent `wake` cannot be lost; the caller then calls
+/// `yield_now` and retries. Boot code may use it before the scheduler runs
+/// as long as it never has to wait.
+pub fn block_unless(try_take: impl FnOnce() -> bool, add_waiter: impl FnOnce(usize)) -> bool {
+    let mut s = SCHED.lock();
+    if try_take() {
+        return true;
+    }
+    let cur = s.current[irq::hart_id()].expect("block outside a thread");
+    add_waiter(cur);
     s.threads[cur].as_mut().unwrap().state = State::Blocked;
-    cur
+    false
 }
 
-pub fn unblock(id: usize) {
-    irq::free(|| {
-        if let Some(t) = sched().threads[id].as_mut() {
+/// Run `f` under the scheduler lock and make every blocked thread whose id
+/// bit is set in the returned mask ready again. Safe from interrupt handlers.
+pub fn wake(f: impl FnOnce() -> u32) {
+    let mut guard = SCHED.lock();
+    let s = &mut *guard;
+    let mask = f();
+    for id in 0..MAX_THREADS {
+        if mask & (1 << id) == 0 {
+            continue;
+        }
+        if let Some(t) = s.threads[id].as_mut() {
             if t.state == State::Blocked {
                 t.state = State::Ready;
+                let (priority, affinity) = (t.priority, t.affinity);
+                kick(s, priority, affinity);
             }
         }
-    });
+    }
 }
 
-static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
-static IDLE_TICKS: AtomicU32 = AtomicU32::new(0);
-static LOAD_PERMILLE: AtomicU32 = AtomicU32::new(0);
-
-/// Share of the last full second not spent in the idle thread (0..=1).
-pub fn cpu_load() -> f32 {
-    LOAD_PERMILLE.load(Ordering::Relaxed) as f32 / 1000.0
+/// Priority of what `hart` runs now, or -1 if it is idle, between threads,
+/// or about to block, so that any ready thread should take it.
+fn running_priority(s: &Scheduler, hart: usize) -> i16 {
+    match s.current[hart].and_then(|i| s.threads[i].as_ref()) {
+        Some(t) if t.state == State::Ready && t.priority != PRIORITY_IDLE => t.priority as i16,
+        _ => -1,
+    }
 }
 
-pub fn request_resched() {
-    NEED_RESCHED.store(true, Ordering::Relaxed);
+/// A thread of `priority` became ready: ask the online core running the
+/// least important thread it outranks to reschedule. Ties go to the
+/// calling core, which saves an interrupt.
+fn kick(s: &Scheduler, priority: u8, affinity: Option<usize>) {
+    let me = irq::hart_id();
+    let mut best: Option<(usize, i16)> = None;
+    for hart in 0..HART_COUNT {
+        if !is_online(hart) || affinity.is_some_and(|a| a != hart) {
+            continue;
+        }
+        let running = running_priority(s, hart);
+        if running >= priority as i16 {
+            continue;
+        }
+        if best.is_none_or(|(_, p)| running < p || (running == p && hart == me)) {
+            best = Some((hart, running));
+        }
+    }
+    if let Some((hart, _)) = best {
+        resched(hart);
+    }
 }
 
-/// Consume a pending reschedule request raised by an interrupt handler.
+/// Make `hart` reschedule soon. Trap handlers check the flag on their way
+/// out; anything else needs an interrupt (to the calling core too, since
+/// core 1 has no tick of its own to notice the flag).
+fn resched(hart: usize) {
+    NEED_RESCHED[hart].store(true, Ordering::SeqCst);
+    if hart != irq::hart_id() || !irq::in_trap() {
+        smp::send_ipi(hart);
+    }
+}
+
+/// Consume this core's pending reschedule request.
 pub fn take_resched() -> bool {
-    NEED_RESCHED.swap(false, Ordering::Relaxed)
+    NEED_RESCHED[irq::hart_id()].swap(false, Ordering::SeqCst)
 }
 
-/// Called from the tick interrupt: account time, wake sleepers, and report
-/// whether the current thread should be preempted.
-pub fn on_tick(now: u32) -> bool {
-    let s = sched();
-    let mut woke_priority = None;
-    for t in s.threads.iter_mut().flatten() {
+/// Share of the last full second core `hart` spent outside its idle thread.
+pub fn cpu_load(hart: usize) -> f32 {
+    LOAD_PERMILLE[hart].load(Ordering::Relaxed) as f32 / 1000.0
+}
+
+/// Whether a ready thread other than the one `hart` runs could take over
+/// from a thread of `priority` there.
+fn has_contender(s: &Scheduler, hart: usize, priority: u8) -> bool {
+    s.threads.iter().enumerate().any(|(i, t)| {
+        t.as_ref().is_some_and(|t| {
+            s.current[hart] != Some(i)
+                && t.state == State::Ready
+                && t.on_cpu.is_none()
+                && t.allowed_on(hart)
+                && t.priority >= priority
+        })
+    })
+}
+
+/// Called from the tick interrupt on core 0: wake sleepers, account time on
+/// every core, and end time slices that another thread is waiting for.
+pub fn on_tick(now: u32) {
+    let mut guard = SCHED.lock();
+    let s = &mut *guard;
+    for i in 0..MAX_THREADS {
+        let Some(t) = s.threads[i].as_mut() else { continue };
         if let State::Sleeping { until } = t.state {
             if (now.wrapping_sub(until) as i32) >= 0 {
                 t.state = State::Ready;
-                woke_priority = woke_priority.max(Some(t.priority));
+                let (priority, affinity) = (t.priority, t.affinity);
+                kick(s, priority, affinity);
             }
         }
     }
-    let Some(cur) = s.current.and_then(|i| s.threads[i].as_mut()) else {
-        return false;
-    };
-    if cur.priority == PRIORITY_IDLE {
-        IDLE_TICKS.fetch_add(1, Ordering::Relaxed);
+    let end_of_second = now % 1000 == 0;
+    for hart in 0..HART_COUNT {
+        if end_of_second {
+            let idle = IDLE_TICKS[hart].swap(0, Ordering::Relaxed);
+            let load = if is_online(hart) { 1000u32.saturating_sub(idle) } else { 0 };
+            LOAD_PERMILLE[hart].store(load, Ordering::Relaxed);
+        }
+        let Some(t) = s.current[hart].and_then(|i| s.threads[i].as_mut()) else { continue };
+        t.run_ticks += 1;
+        if t.priority == PRIORITY_IDLE {
+            IDLE_TICKS[hart].fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        t.slice_used += 1;
+        let priority = t.priority;
+        if t.slice_used >= TIME_SLICE_TICKS && has_contender(s, hart, priority) {
+            resched(hart);
+        }
     }
-    if now % 1000 == 0 {
-        let idle = IDLE_TICKS.swap(0, Ordering::Relaxed);
-        LOAD_PERMILLE.store(1000u32.saturating_sub(idle), Ordering::Relaxed);
-    }
-    cur.run_ticks += 1;
-    cur.slice_used += 1;
-    woke_priority.is_some_and(|p| p > cur.priority) || cur.slice_used >= TIME_SLICE_TICKS
 }
 
-/// Pick the next thread and return the frame to resume. `frame` is the
-/// context that trapped, or a throwaway boot frame before the first switch.
+/// Pick the next thread for the calling core and return the frame to
+/// resume. `frame` is the context that trapped, or a throwaway boot frame
+/// before the core's first switch.
 pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
-    let s = sched();
-    if let Some(cur) = s.current {
+    let mut guard = SCHED.lock();
+    let s = &mut *guard;
+    let hart = irq::hart_id();
+    let prev = s.current[hart];
+    if let Some(cur) = prev {
         let t = s.threads[cur].as_mut().unwrap();
         t.frame = frame;
         if unsafe { t.stack_bottom.read() } != STACK_CANARY {
-            kprintln!("*** stack overflow in thread '{}'", t.name);
+            kprintln!("*** stack overflow in thread '{}' on hart {}", t.name, hart);
             crate::halt();
         }
     }
 
-    let next = pick_next(s);
-    if s.current != Some(next) {
-        if let Some(cur) = s.current {
+    let next = pick_next(s, hart);
+    s.current[hart] = Some(next);
+    if prev != Some(next) {
+        if let Some(cur) = prev {
             let t = s.threads[cur].as_mut().unwrap();
             save_fp(t);
+            t.on_cpu = None;
+            // Preempted but still runnable: another core may be free for it.
+            if t.state == State::Ready {
+                let (priority, affinity) = (t.priority, t.affinity);
+                kick(s, priority, affinity);
+            }
         }
-        let t = s.threads[next].as_mut().unwrap();
-        restore_fp(t);
+        restore_fp(s.threads[next].as_ref().unwrap());
     }
     let t = s.threads[next].as_mut().unwrap();
+    t.on_cpu = Some(hart);
+    t.last_cpu = Some(hart);
     t.slice_used = 0;
-    s.current = Some(next);
     t.frame
 }
 
-/// Highest priority ready thread, round-robin among equals starting after
-/// the current one.
-fn pick_next(s: &Scheduler) -> usize {
-    let start = s.current.map_or(0, |c| c + 1);
+/// Highest-priority ready thread that may run on `hart` and is not running
+/// elsewhere, round-robin among equals starting after the current one.
+fn pick_next(s: &Scheduler, hart: usize) -> usize {
+    let start = s.current[hart].map_or(0, |c| c + 1);
     let mut best: Option<(usize, u8)> = None;
     for k in 0..MAX_THREADS {
         let i = (start + k) % MAX_THREADS;
         if let Some(t) = &s.threads[i] {
-            if t.state == State::Ready && best.is_none_or(|(_, p)| t.priority > p) {
+            let runnable =
+                t.state == State::Ready && t.on_cpu.is_none_or(|c| c == hart) && t.allowed_on(hart);
+            if runnable && best.is_none_or(|(_, p)| t.priority > p) {
                 best = Some((i, t.priority));
             }
         }
@@ -353,30 +492,38 @@ pub struct ThreadInfo {
     pub run_ticks: u32,
     pub stack_size: usize,
     pub stack_used: usize,
-    pub current: bool,
+    /// Core running the thread now.
+    pub cpu: Option<usize>,
+    /// Core that ran it most recently.
+    pub last_cpu: Option<usize>,
+    pub affinity: Option<usize>,
 }
 
-/// Copy out thread info so callers can print without masking interrupts.
-pub fn snapshot() -> [Option<ThreadInfo>; MAX_THREADS] {
-    irq::free(|| {
-        let s = sched();
-        let mut out = [None; MAX_THREADS];
-        for (i, t) in s.threads.iter().enumerate() {
-            if let Some(t) = t {
-                out[i] = Some(ThreadInfo {
-                    id: i,
-                    name: t.name,
-                    priority: t.priority,
-                    state: t.state,
-                    run_ticks: t.run_ticks,
-                    stack_size: t.stack_size,
-                    stack_used: stack_high_water(t),
-                    current: s.current == Some(i),
-                });
-            }
+/// Copy out thread info so callers can print without holding the lock.
+/// Gives up with the holder's hart id if the scheduler lock stays taken
+/// (a core stuck inside the scheduler), so a debug dump cannot hang.
+pub fn snapshot() -> Result<[Option<ThreadInfo>; MAX_THREADS], Option<usize>> {
+    let Some(s) = SCHED.try_lock_for(100_000) else {
+        return Err(SCHED.owner());
+    };
+    let mut out = [None; MAX_THREADS];
+    for (i, t) in s.threads.iter().enumerate() {
+        if let Some(t) = t {
+            out[i] = Some(ThreadInfo {
+                id: i,
+                name: t.name,
+                priority: t.priority,
+                state: t.state,
+                run_ticks: t.run_ticks,
+                stack_size: t.stack_size,
+                stack_used: stack_high_water(t),
+                cpu: t.on_cpu,
+                last_cpu: t.last_cpu,
+                affinity: t.affinity,
+            });
         }
-        out
-    })
+    }
+    Ok(out)
 }
 
 /// Bytes of stack ever touched, found by scanning for the fill pattern.

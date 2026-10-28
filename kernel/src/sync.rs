@@ -1,12 +1,16 @@
 //! Blocking synchronisation primitives for kernel threads.
 
-use crate::{irq, sched};
+use crate::sched;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 
 /// Counting semaphore. Waiters are kept as a bitmask of thread ids and all
 /// of them retry on release, which is simple and fair enough for a small
 /// fixed thread table.
+///
+/// `count` and `waiters` are only touched inside `sched::block_unless` and
+/// `sched::wake`, i.e. under the scheduler lock, which serialises both cores
+/// and interrupt handlers and makes "check, then block" atomic.
 pub struct Semaphore {
     count: UnsafeCell<u32>,
     waiters: UnsafeCell<u32>,
@@ -23,16 +27,16 @@ impl Semaphore {
 
     pub fn acquire(&self) {
         loop {
-            let acquired = irq::free(|| unsafe {
-                if *self.count.get() > 0 {
-                    *self.count.get() -= 1;
-                    true
-                } else {
-                    let id = sched::mark_current_blocked();
-                    *self.waiters.get() |= 1 << id;
-                    false
-                }
-            });
+            let acquired = sched::block_unless(
+                || unsafe {
+                    let count = &mut *self.count.get();
+                    *count > 0 && {
+                        *count -= 1;
+                        true
+                    }
+                },
+                |id| unsafe { *self.waiters.get() |= 1 << id },
+            );
             if acquired {
                 return;
             }
@@ -42,18 +46,10 @@ impl Semaphore {
 
     /// Safe to call from interrupt handlers.
     pub fn release(&self) {
-        let woken = irq::free(|| unsafe {
+        sched::wake(|| unsafe {
             *self.count.get() += 1;
             core::mem::take(&mut *self.waiters.get())
         });
-        for id in 0..32 {
-            if woken & (1 << id) != 0 {
-                sched::unblock(id);
-            }
-        }
-        if woken != 0 {
-            sched::request_resched();
-        }
     }
 }
 

@@ -8,10 +8,11 @@
 //! metadata of its own. `dealloc` receives the original `Layout`, which
 //! lets allocated blocks carry no header either. Neighbouring free blocks
 //! are merged on free to fight fragmentation.
+//!
+//! Each pool is guarded by its own spinlock so both cores can allocate.
 
-use crate::irq;
+use crate::spin::SpinLock;
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::ptr::{self, NonNull};
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
@@ -27,20 +28,22 @@ struct State {
     head: Option<NonNull<FreeBlock>>,
     total: usize,
     used: usize,
+    /// High-water mark of `used` since the last `take_peaks`.
+    peak: usize,
 }
 
-struct Pool(UnsafeCell<State>);
+// The free-list nodes are plain memory owned by the pool; the state is only
+// reached through the pool's lock.
+unsafe impl Send for State {}
 
-unsafe impl Sync for Pool {}
+type Pool = SpinLock<State>;
 
-impl Pool {
-    const fn new() -> Self {
-        Pool(UnsafeCell::new(State { head: None, total: 0, used: 0 }))
-    }
+const fn new_pool() -> Pool {
+    SpinLock::new(State { head: None, total: 0, used: 0, peak: 0 })
 }
 
-static SRAM: Pool = Pool::new();
-static PSRAM: Pool = Pool::new();
+static SRAM: Pool = new_pool();
+static PSRAM: Pool = new_pool();
 
 /// Allocations at least this large go to PSRAM first.
 const LARGE: usize = 64 * 1024;
@@ -84,11 +87,9 @@ pub unsafe fn add_region(start: usize, size: usize) {
     if size < MIN_BLOCK {
         return;
     }
-    irq::free(|| unsafe {
-        let st = &mut *pool.0.get();
-        st.total += size;
-        insert_free(st, base, size);
-    });
+    let mut st = pool.lock();
+    st.total += size;
+    unsafe { insert_free(&mut st, base, size) };
 }
 
 fn is_psram(addr: usize) -> bool {
@@ -106,24 +107,34 @@ pub fn psram_usage() -> (usize, usize) {
 }
 
 fn pool_usage(pool: &Pool) -> (usize, usize) {
-    irq::free(|| unsafe {
-        let st = &*pool.0.get();
-        (st.used, st.total)
-    })
+    let st = pool.lock();
+    (st.used, st.total)
+}
+
+/// Peak (SRAM, PSRAM) bytes used since the previous call; restarts the
+/// measurement from the current usage.
+pub fn take_peaks() -> (usize, usize) {
+    let take = |pool: &Pool| {
+        let mut st = pool.lock();
+        let peak = st.peak;
+        st.peak = st.used;
+        peak
+    };
+    (take(&SRAM), take(&PSRAM))
 }
 
 /// Size of the largest free SRAM block, a quick fragmentation indicator.
 pub fn largest_free() -> usize {
-    irq::free(|| unsafe {
-        let st = &*SRAM.0.get();
-        let mut best = 0;
-        let mut cur = st.head;
-        while let Some(b) = cur {
+    let st = SRAM.lock();
+    let mut best = 0;
+    let mut cur = st.head;
+    while let Some(b) = cur {
+        unsafe {
             best = best.max(b.as_ref().size);
             cur = b.as_ref().next;
         }
-        best
-    })
+    }
+    best
 }
 
 /// Insert a free range keeping address order, merging with neighbours.
@@ -167,8 +178,9 @@ fn block_size(layout: &Layout) -> usize {
 }
 
 unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
-    irq::free(|| unsafe {
-        let st = &mut *pool.0.get();
+    let mut guard = pool.lock();
+    let st = &mut *guard;
+    unsafe {
         let mut prev: Option<NonNull<FreeBlock>> = None;
         let mut cur = st.head;
         while let Some(c) = cur {
@@ -189,13 +201,14 @@ unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
                     insert_free(st, base + size, end - base - size);
                 }
                 st.used += size;
+                st.peak = st.peak.max(st.used);
                 return base as *mut u8;
             }
             prev = cur;
             cur = c.as_ref().next;
         }
         ptr::null_mut()
-    })
+    }
 }
 
 unsafe impl GlobalAlloc for Heap {
@@ -212,10 +225,8 @@ unsafe impl GlobalAlloc for Heap {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let size = block_size(&layout);
         let pool = if is_psram(ptr as usize) { &PSRAM } else { &SRAM };
-        irq::free(|| unsafe {
-            let st = &mut *pool.0.get();
-            st.used -= size;
-            insert_free(st, ptr as usize, size);
-        });
+        let mut st = pool.lock();
+        st.used -= size;
+        unsafe { insert_free(&mut st, ptr as usize, size) };
     }
 }

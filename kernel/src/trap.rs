@@ -72,7 +72,7 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
 fn fatal_exception(f: &TrapFrame) -> ! {
     let code = f.mcause & 0xFFF;
     kprintln!();
-    kprintln!("*** exception {}: {}", code, exception_name(code));
+    kprintln!("*** exception {} on hart {}: {}", code, irq::hart_id(), exception_name(code));
     kprintln!("mepc={:#010x} mtval={:#010x} mcause={:#010x}", f.mepc, f.mtval, f.mcause);
     for (i, chunk) in f.regs.chunks(4).enumerate() {
         for (j, value) in chunk.iter().enumerate() {

@@ -12,6 +12,7 @@ use alloc::string::String;
 use alloc::vec;
 use p4os_apps::desktop::Desktop;
 use p4os_sdk::gui::ui::{Input, Key};
+use p4os_sdk::config;
 use p4os_sdk::*;
 
 const IDLE_POLL_MS: u32 = 16;
@@ -28,7 +29,7 @@ fn run(_: usize) {
     let mut buffers = [back, front];
     let mut logical = vec![Color::BLACK; display::WIDTH * display::HEIGHT];
     let mut desktop = Desktop::new();
-    let mut sys = KernelSystem::default();
+    let mut sys = KernelSystem::restored();
     let mut input = Input::default();
     let mut next_frame_at = 0u64;
 
@@ -43,7 +44,8 @@ fn run(_: usize) {
             continue;
         }
         let had_input = poll_input(&mut input) | poll_touch(&mut input, sys.orientation);
-        let now = systimer::now_ticks() / (systimer::TICKS_PER_US * 1000);
+        let now = now_ms();
+        sys.save_brightness_if_settled(now);
         if !had_input && now < next_frame_at {
             sched::sleep_ms(IDLE_POLL_MS);
             continue;
@@ -67,6 +69,10 @@ fn run(_: usize) {
         sys.last_present_us = ((systimer::now_ticks() - render_done) / systimer::TICKS_PER_US) as u32;
         next_frame_at = now + next.unwrap_or(1000) as u64;
     }
+}
+
+fn now_ms() -> u64 {
+    systimer::now_ticks() / (systimer::TICKS_PER_US * 1000)
 }
 
 /// Copy the logical frame into the panel buffer. Landscape frames are
@@ -199,16 +205,46 @@ fn poll_input(input: &mut Input) -> bool {
     any
 }
 
+/// A brightness change is saved once the slider has rested this long, so
+/// dragging it does not rewrite flash on every frame.
+const BRIGHTNESS_SAVE_DELAY_MS: u64 = 1500;
+
 /// OS services for apps, backed by the kernel.
 #[derive(Default)]
 struct KernelSystem {
     orientation: Orientation,
-    brightness: f32,
     fs: crate::fs::SdFs,
     audio: crate::audio::Speaker,
     net: crate::net::WifiNet,
     last_frame_us: u32,
     last_present_us: u32,
+    /// Brightness set by an app but not saved yet, and when (ms).
+    unsaved_brightness: Option<(f32, u64)>,
+}
+
+impl KernelSystem {
+    /// Apply the saved orientation and brightness. Runs after the display
+    /// (and so the backlight) is initialised.
+    fn restored() -> Self {
+        let mut sys = Self::default();
+        if let Some(o) = crate::config::get(config::UI_ORIENTATION).and_then(|v| config::parse_orientation(&v)) {
+            sys.orientation = o;
+        }
+        if let Some(b) = crate::config::get(config::UI_BRIGHTNESS).and_then(|v| config::parse_brightness(&v)) {
+            crate::backlight::set(b);
+        }
+        kprintln!("gui: {:?}, brightness {:.0}%", sys.orientation, crate::backlight::level() * 100.0);
+        sys
+    }
+
+    fn save_brightness_if_settled(&mut self, now_ms: u64) {
+        if let Some((level, t)) = self.unsaved_brightness
+            && now_ms.saturating_sub(t) >= BRIGHTNESS_SAVE_DELAY_MS
+        {
+            self.unsaved_brightness = None;
+            self.config_set(config::UI_BRIGHTNESS, &config::brightness_value(level));
+        }
+    }
 }
 
 impl System for KernelSystem {
@@ -240,6 +276,7 @@ impl System for KernelSystem {
         let (heap_used, heap_total) = heap::usage();
         let (psram_used, psram_total) = heap::psram_usage();
         let threads = sched::snapshot()
+            .unwrap_or([None; sched::MAX_THREADS])
             .into_iter()
             .flatten()
             .map(|t| ThreadStat {
@@ -249,12 +286,15 @@ impl System for KernelSystem {
                 cpu_ms: t.run_ticks,
                 stack_used: t.stack_used as u32,
                 stack_size: t.stack_size as u32,
+                core: t.cpu.or(t.last_cpu).map(|c| c as u8),
             })
             .collect();
+        let core_loads: alloc::vec::Vec<f32> = (0..crate::irq::HART_COUNT).map(sched::cpu_load).collect();
         SystemStats {
             uptime_ms: time::ticks() as u64,
             cpu_mhz: 360,
-            cpu_load: sched::cpu_load(),
+            cpu_load: core_loads.iter().sum::<f32>() / core_loads.len() as f32,
+            core_loads,
             heap_used,
             heap_total,
             psram_used,
@@ -273,8 +313,8 @@ impl System for KernelSystem {
     }
 
     fn set_brightness(&mut self, value: f32) {
-        self.brightness = value;
         crate::backlight::set(value);
+        self.unsaved_brightness = Some((value, now_ms()));
     }
 
     fn run_command(&mut self, line: &str) -> String {
@@ -288,7 +328,38 @@ impl System for KernelSystem {
     }
 
     fn set_orientation(&mut self, o: Orientation) {
-        self.orientation = o;
+        if o != self.orientation {
+            self.orientation = o;
+            self.config_set(config::UI_ORIENTATION, config::orientation_value(o));
+        }
+    }
+
+    fn wifi_connect(&mut self, ssid: &str, password: &str) {
+        if let Err(e) = config::check_wifi(ssid, password) {
+            kprintln!("wifi: {}", e);
+            return;
+        }
+        let saved = crate::config::update(|e| {
+            e.insert(config::WIFI_SSID.into(), ssid.into());
+            e.insert(config::WIFI_PASSWORD.into(), password.into());
+        });
+        if let Err(e) = saved {
+            kprintln!("config: saving Wi-Fi network failed: {:?}", e);
+        }
+        crate::wifi_auto::request(ssid, password);
+    }
+
+    fn config_get(&self, key: &str) -> Option<String> {
+        if config::is_secret(key) {
+            return None;
+        }
+        crate::config::get(key)
+    }
+
+    fn config_set(&mut self, key: &str, value: &str) {
+        if let Err(e) = crate::config::set(key, value) {
+            kprintln!("config: saving {} failed: {:?}", key, e);
+        }
     }
 }
 

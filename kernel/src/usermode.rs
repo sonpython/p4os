@@ -192,11 +192,13 @@ fn current_app() -> Option<&'static mut UserApp> {
     unsafe { app.as_mut() }
 }
 
-/// Start `app` in a new thread named `thread_name`. Returns the thread id.
-pub fn spawn(thread_name: &'static str, app: UserApp) -> (usize, Arc<AppStatus>) {
+/// Start `app` in a new thread named `thread_name`, pinned to core `hart`
+/// (PMP lock state differs per core, see `pmp::app_hart`). Returns the
+/// thread id.
+pub fn spawn(hart: usize, thread_name: &'static str, app: UserApp) -> (usize, Arc<AppStatus>) {
     let status = app.status.clone();
     let raw = Box::into_raw(Box::new(app));
-    let id = sched::spawn(thread_name, PRIORITY, KERNEL_STACK, thread_main, raw as usize);
+    let id = sched::spawn_on(Some(hart), thread_name, PRIORITY, KERNEL_STACK, thread_main, raw as usize);
     (id, status)
 }
 

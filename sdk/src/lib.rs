@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+pub mod config;
+
 pub use p4os_gui as gui;
 pub use p4os_gui::{Canvas, Color, Point, Rect, Ui};
 
@@ -121,6 +123,8 @@ pub trait Network {
     fn is_up(&self) -> bool;
     /// Start an HTTP GET in the background.
     fn fetch(&mut self, url: &str) -> FetchId;
+    /// Current state of a fetch. Once `Done` or `Failed` has been
+    /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
 }
 
@@ -132,14 +136,19 @@ pub struct ThreadStat {
     pub cpu_ms: u32,
     pub stack_used: u32,
     pub stack_size: u32,
+    /// CPU core running the thread now, or the one that ran it last.
+    pub core: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SystemStats {
     pub uptime_ms: u64,
     pub cpu_mhz: u32,
-    /// Share of time spent outside the idle thread over the last second.
+    /// Share of time spent outside the idle threads over the last second,
+    /// averaged over all cores.
     pub cpu_load: f32,
+    /// The same share for each CPU core.
+    pub core_loads: Vec<f32>,
     pub heap_used: usize,
     pub heap_total: usize,
     pub psram_used: usize,
@@ -214,4 +223,14 @@ pub trait System {
     }
     /// Request a rotation; takes effect from the next frame.
     fn set_orientation(&mut self, _o: Orientation) {}
+    /// Join a Wi-Fi network in the background and remember the credentials
+    /// so the OS reconnects at boot. Check [`Network::status`] for progress.
+    fn wifi_connect(&mut self, _ssid: &str, _password: &str) {}
+    /// Read a persistent setting (keys in [`config`]). Secret values such
+    /// as the Wi-Fi password are write-only and read back as `None`.
+    fn config_get(&self, _key: &str) -> Option<String> {
+        None
+    }
+    /// Store a persistent setting; it survives reboots.
+    fn config_set(&mut self, _key: &str, _value: &str) {}
 }
