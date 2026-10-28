@@ -254,7 +254,8 @@ pub fn init() {
     codec_init();
     gpio::output(PIN_PA, true);
     READY.store(true, Ordering::Release);
-    sched::spawn("audio", 4, 16 * 1024, audio_thread, 0);
+    // MP3 decoding needs more than 16 KiB of stack.
+    sched::spawn("audio", 4, 32 * 1024, audio_thread, 0);
     kprintln!("audio: I2S1 + ES8311 ready at {} Hz", rate);
 }
 
