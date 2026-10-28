@@ -1,0 +1,11 @@
+[package]
+name = "p4os-apps"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Desktop shell and built-in apps for p4os"
+
+[dependencies]
+p4os-sdk = { path = "../sdk" }
+p4os-media = { path = "../media" }
+libm = "0.2"

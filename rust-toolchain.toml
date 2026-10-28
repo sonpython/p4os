@@ -1,0 +1,4 @@
+[toolchain]
+channel = "stable"
+targets = ["riscv32imafc-unknown-none-elf"]
+components = ["rust-src", "llvm-tools"]

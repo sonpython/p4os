@@ -1,0 +1,12 @@
+[package]
+name = "p4os-gui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Graphics, fonts and immediate-mode widgets for p4os"
+
+[lib]
+test = true
+
+[dependencies]
+libm = "0.2"

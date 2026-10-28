@@ -1,0 +1,11 @@
+[package]
+name = "p4os-media"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Image and audio decoding for p4os"
+
+[dependencies]
+p4os-sdk = { path = "../sdk" }
+zune-jpeg = { version = "0.4", default-features = false }
+nanomp3 = "0.1"

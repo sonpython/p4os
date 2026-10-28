@@ -1,0 +1,19 @@
+[package]
+name = "p4os-kernel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "p4os"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+libm = "0.2"
+smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "proto-dns", "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns"] }
+p4os-sdk = { path = "../sdk" }
+p4os-apps = { path = "../apps" }
+p4os-media = { path = "../media" }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "38b3a79", default-features = false, features = ["alloc", "lfn", "unicode"] }

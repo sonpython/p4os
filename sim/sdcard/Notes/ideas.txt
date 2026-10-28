@@ -1,0 +1,2 @@
+Ideas
+Weather widget for the home screen. A small game using the touch screen.

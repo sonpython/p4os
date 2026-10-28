@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["kernel", "gui", "sdk", "apps", "media", "sim"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
+panic = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"

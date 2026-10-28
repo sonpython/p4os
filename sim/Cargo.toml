@@ -1,0 +1,12 @@
+[package]
+name = "p4os-sim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Host simulator for the p4os desktop: scripted input, PNG screenshots"
+
+[dependencies]
+p4os-sdk = { path = "../sdk" }
+p4os-apps = { path = "../apps" }
+p4os-media = { path = "../media" }
+png = "0.17"

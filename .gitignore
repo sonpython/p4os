@@ -1,0 +1,6 @@
+# Build output (cargo target dir, images, captures)
+/out
+/target
+# Local firmware dumps; the bundled fonts in gui/fonts are needed for builds.
+*.bin
+!gui/fonts/*.bin

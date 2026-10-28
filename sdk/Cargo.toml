@@ -1,0 +1,9 @@
+[package]
+name = "p4os-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Application interface for p4os"
+
+[dependencies]
+p4os-gui = { path = "../gui" }
