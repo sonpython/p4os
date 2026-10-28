@@ -9,7 +9,7 @@ use p4os_sdk::FetchState;
 use p4os_ytplay::bench;
 use p4os_ytplay::remote;
 
-const USAGE: &str = "usage: yt play ID|URL [144|240|audio] | yt pause | yt seek [+-]SECONDS | yt stop | yt stat | yt bench URL [FRAMES] | yt bench-opus URL";
+const USAGE: &str = "usage: yt play ID|URL [144|240|audio] | yt pause | yt seek [+-]SECONDS | yt stop | yt stat | yt bench URL [FRAMES] | yt bench-opus URL [REFERENCE_PCM_URL]";
 const FETCH_WAIT_MS: u32 = 60_000;
 
 pub fn command(args: &str) {
@@ -20,7 +20,7 @@ pub fn command(args: &str) {
             let frames = frames.and_then(|n| n.parse().ok()).unwrap_or(300);
             run_bench(url, Bench::H264(frames));
         }
-        (Some("bench-opus"), Some(url), None) => run_bench(url, Bench::Opus),
+        (Some("bench-opus"), Some(url), reference) => run_bench(url, Bench::Opus(reference.map(String::from))),
         _ => match remote::parse_command(args) {
             // The desktop opens the player for a queued command.
             Ok(cmd) => {
@@ -54,15 +54,16 @@ fn fetch_body(url: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-#[derive(Clone, Copy)]
 enum Bench {
     H264(u32),
-    Opus,
+    /// With the URL of a reference decode (s16le stereo 48 kHz) to compare.
+    Opus(Option<String>),
 }
 
 struct BenchJob {
     kind: Bench,
     data: Vec<u8>,
+    reference: Option<Vec<u8>>,
 }
 
 static BENCH_DONE: crate::sync::Semaphore = crate::sync::Semaphore::new(0);
@@ -74,8 +75,15 @@ fn run_bench(url: &str, kind: Bench) {
         Ok(d) => d,
         Err(e) => return kprintln!("yt bench: {}", e),
     };
+    let reference = match &kind {
+        Bench::Opus(Some(url)) => match fetch_body(url) {
+            Ok(r) => Some(r),
+            Err(e) => return kprintln!("yt bench: reference: {}", e),
+        },
+        _ => None,
+    };
     kprintln!("yt bench: {} bytes, decoding on core 1", data.len());
-    let job = Box::new(BenchJob { kind, data });
+    let job = Box::new(BenchJob { kind, data, reference });
     let _ = crate::heap::take_peaks();
     let (sram0, psram0) = (crate::heap::usage().0, crate::heap::psram_usage().0);
     // The thread takes ownership of the job and signals when it is done.
@@ -94,7 +102,7 @@ fn bench_thread(arg: usize) {
     let job = unsafe { Box::from_raw(arg as *mut BenchJob) };
     let result = match job.kind {
         Bench::H264(frames) => bench::h264(&job.data, frames, &now_us).map(|r| r.summary(bench::H264_DECODER)),
-        Bench::Opus => bench::opus(&job.data, &now_us).map(|r| r.summary()),
+        Bench::Opus(_) => bench::opus(&job.data, job.reference.as_deref(), &now_us).map(|r| r.summary()),
     };
     match result {
         Ok(line) => kprintln!("{}", line),

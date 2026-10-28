@@ -115,6 +115,10 @@ pub struct OpusReport {
     pub max_packet_us: u64,
     /// CRC-32 of the interleaved s16le PCM (after the pre-skip).
     pub crc: u32,
+    /// Against a reference decode (ffmpeg, s16le stereo 48 kHz), skipping
+    /// the first 0.5 s where decoders settle differently: SNR in dB and
+    /// the largest sample difference.
+    pub reference: Option<(f64, u32)>,
 }
 
 impl OpusReport {
@@ -129,12 +133,29 @@ impl OpusReport {
             self.max_packet_us,
             load,
             self.crc
-        )
+        ) + &match self.reference {
+            Some((snr, max)) => format!("; vs reference: SNR {snr:.1} dB, max diff {max}"),
+            None => String::new(),
+        }
     }
 }
 
+/// SNR (dB) and largest difference of `got` against `want` (s16le bytes),
+/// over the samples both have after `skip` samples.
+pub fn compare_pcm(got: &[i16], want: &[u8], skip: usize) -> (f64, u32) {
+    let (mut sig, mut noise, mut max) = (0f64, 0f64, 0u32);
+    for (g, w) in got.iter().zip(want.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]))).skip(skip) {
+        let (g, w) = (*g as f64, w as f64);
+        sig += w * w;
+        noise += (g - w) * (g - w);
+        max = max.max((g - w).abs() as u32);
+    }
+    let snr = if noise == 0.0 { f64::INFINITY } else { 10.0 * libm::log10(sig / noise) };
+    (snr, max)
+}
+
 /// Decode every Opus packet of a WebM file (whole or truncated).
-pub fn opus(webm_file: &[u8], now_us: &dyn Fn() -> u64) -> Result<OpusReport, String> {
+pub fn opus(webm_file: &[u8], reference: Option<&[u8]>, now_us: &dyn Fn() -> u64) -> Result<OpusReport, String> {
     let (init, packets) = crate::webm::demux_file(webm_file)?;
     if packets.is_empty() {
         return Err("no Opus packets".into());
@@ -144,6 +165,7 @@ pub fn opus(webm_file: &[u8], now_us: &dyn Fn() -> u64) -> Result<OpusReport, St
     let mut crc = 0;
     let mut skip = init.pre_skip() as usize * 2;
     let mut pcm = Vec::new();
+    let mut all = Vec::new();
     for p in &packets {
         pcm.clear();
         let t = now_us();
@@ -157,14 +179,27 @@ pub fn opus(webm_file: &[u8], now_us: &dyn Fn() -> u64) -> Result<OpusReport, St
         skip -= drop;
         let bytes: Vec<u8> = pcm[drop..].iter().flat_map(|s| s.to_le_bytes()).collect();
         crc = crc32(crc, &bytes);
+        if reference.is_some_and(|want| all.len() * 2 < want.len()) {
+            all.extend_from_slice(&pcm[drop..]);
+        }
     }
     r.crc = crc;
+    r.reference = reference.map(|want| compare_pcm(&all, want, crate::audio::RATE as usize));
     Ok(r)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compares_pcm() {
+        let want: Vec<u8> = [1000i16, -1000, 500, 0].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let (snr, max) = compare_pcm(&[1000, -1000, 500, 0], &want, 0);
+        assert!(snr > 100.0 && max == 0);
+        let (snr, max) = compare_pcm(&[1010, -1000, 500, 0, 7], &want, 0);
+        assert!((snr - 43.5).abs() < 0.2 && max == 10, "{snr}");
+    }
 
     #[test]
     fn crc_matches_reference() {
