@@ -46,7 +46,7 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench lcd hwscan flash config wifi get smpdemo"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config wifi get smpdemo"
         ),
         "flash" => crate::flash::diagnose(),
         "config" | "config list" => config_list(),
@@ -55,6 +55,7 @@ fn execute(cmd: &str) {
         c if c.starts_with("wifi save ") => wifi_join(c["wifi save ".len()..].trim(), true),
         c if c.starts_with("wifi connect ") => wifi_join(c["wifi connect ".len()..].trim(), false),
         "membench" => membench(),
+        "bench" => crate::bench::run(),
         "lcd" => crate::display::diagnose(),
         "hwscan" => hwscan(),
         "sd" => sd_probe(crate::sdmmc::DEFAULT_BUS),

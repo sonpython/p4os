@@ -22,6 +22,7 @@ pub const CLIC_CTRL: usize = 0x2080_1000;
 pub mod source {
     pub const USB_SERIAL_JTAG: usize = 22;
     pub const SYSTIMER_TARGET0: usize = 53;
+    pub const SYSTIMER_TARGET1: usize = 54;
     pub const DW_GDMA: usize = 24;
     pub const AHB_PDMA_OUT_CH0: usize = 59;
     /// CPU-to-CPU interrupts, raised by writing HP_SYS CPU_INT_FROM_CPU_n.

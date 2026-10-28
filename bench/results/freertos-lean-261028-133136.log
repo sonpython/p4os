@@ -1,0 +1,104 @@
+ESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x4fc1018a
+Core1 Saved PC:0x4fc058dc
+SPI mode:DIO, clock div:1
+load:0x4ff33ce0,len:0x17a4
+load:0x4ff29ed0,len:0xf28
+load:0x4ff2cbd0,len:0x3454
+entry 0x4ff29eda
+I (13) boot: ESP-IDF v5.5 2nd stage bootloader
+I (14) boot: compile time Aug 14 2025 17:01:30
+I (15) boot: Multicore bootloader
+I (17) boot: chip revision: v1.0
+I (17) boot: efuse block revision: v0.3
+I (18) qio_mode: Enabling default flash chip QIO
+I (19) boot.esp32p4: SPI Speed      : 80MHz
+I (20) boot.esp32p4: SPI Mode       : QIO
+I (21) boot.esp32p4: SPI Flash Size : 16MB
+I (22) boot: Enabling RNG early entropy source...
+I (23) boot: Partition Table:
+I (24) boot: ## Label            Usage          Type ST Offset   Length
+I (26) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (27) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (28) boot:  2 factory          factory app      00 00 00010000 00700000
+I (29) boot:  3 storage          Unknown data     01 82 00710000 00600000
+I (30) boot: End of partition table
+I (31) esp_image: segment 0: paddr=00010020 vaddr=40020020 size=05f88h ( 24456) map
+I (36) esp_image: segment 1: paddr=00015fb0 vaddr=30100000 size=00070h (   112) load
+I (37) esp_image: segment 2: paddr=00016028 vaddr=4ff00000 size=09ff0h ( 40944) load
+I (46) esp_image: segment 3: paddr=00020020 vaddr=40000020 size=123e0h ( 74720) map
+I (57) esp_image: segment 4: paddr=00032408 vaddr=4ff09ff0 size=02980h ( 10624) load
+I (60) esp_image: segment 5: paddr=00034d90 vaddr=4ff0c980 size=01234h (  4660) load
+I (65) boot: Loaded app from partition at offset 0x10000
+I (65) boot: Disabling RNG early entropy source...
+I (68) hex_psram: vendor id    : 0x0d (AP)
+I (69) hex_psram: Latency      : 0x01 (Fixed)
+I (70) hex_psram: DriveStr.    : 0x00 (25 Ohm)
+I (71) hex_psram: dev id       : 0x03 (generation 4)
+I (72) hex_psram: density      : 0x07 (256 Mbit)
+I (73) hex_psram: good-die     : 0x06 (Pass)
+I (74) hex_psram: SRF          : 0x02 (Slow Refresh)
+I (75) hex_psram: BurstType    : 0x00 ( Wrap)
+I (76) hex_psram: BurstLen     : 0x03 (2048 Byte)
+I (77) hex_psram: BitMode      : 0x01 (X16 Mode)
+I (78) hex_psram: Readlatency  : 0x04 (14 cycles@Fixed)
+I (79) hex_psram: DriveStrength: 0x00 (1/1)
+I (80) MSPI Timing: Enter psram timing tuning
+I (249) esp_psram: Found 32MB PSRAM device
+I (249) esp_psram: Speed: 200MHz
+I (252) hex_psram: psram CS IO is dedicated
+I (252) cpu_start: Unicore app
+I (253) cpu_start: Single core mode
+I (1014) esp_psram: SPI SRAM memory test OK
+I (1024) cpu_start: Pro cpu start user code
+I (1024) cpu_start: cpu freq: 360000000 Hz
+I (1025) app_init: Application information:
+I (1026) app_init: Project name:     p4bench
+I (1026) app_init: App version:      7e865fb-dirty
+I (1027) app_init: Compile time:     Oct 28 2026 13:24:38
+I (1028) app_init: ELF file SHA256:  597c214e6...
+I (1029) app_init: ESP-IDF:          v5.5.6
+I (1030) efuse_init: Min chip rev:     v1.0
+I (1030) efuse_init: Max chip rev:     v1.99 
+I (1031) efuse_init: Chip rev:         v1.0
+I (1032) heap_init: Initializing. RAM available for dynamic allocation:
+I (1033) heap_init: At 4FF0F080 len 0002BF40 (175 KiB): RETENT_RAM
+I (1034) heap_init: At 4FF3AFC0 len 00004BF0 (18 KiB): RAM
+I (1034) heap_init: At 4FF40000 len 00040000 (256 KiB): RAM
+I (1035) heap_init: At 50108080 len 00007F80 (31 KiB): RTCRAM
+I (1036) heap_init: At 30100070 len 00001F90 (7 KiB): SPM
+I (1037) esp_psram: Adding pool of 32768K of PSRAM memory to heap allocator
+W (1039) spi_flash: Detected boya flash chip but using generic driver. For optimal functionality, enable `SPI_FLASH_SUPPORT_BOYA_CHIP` in menuconfig
+I (1041) spi_flash: detected chip: generic
+I (1041) spi_flash: flash io: dio
+I (1042) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (1043) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (1044) main_task: Started on CPU0
+I (1044) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (1045) main_task: Calling app_main()
+I (1045) main_task: Returned from app_main()
+bench: freertos (esp-idf v5.5.6), cpu 359 MHz, 5 runs per test, median/min/max over runs
+test                                     unit          median        min        max
+ctx switch (sem ping-pong)               ns            5142.5     5126.1     5142.7
+yield (2 equal-prio threads)             ns            1995.9     1995.0     1996.2
+mutex lock+unlock (uncontended)          ns             917.7      915.5      945.5
+irq latency avg (thread blocked)         ns             687.5      687.4      687.8
+irq latency max (thread blocked)         ns             875.0      687.5     1250.0
+irq latency avg (cpu busy)               ns             687.5      687.4      687.5
+irq entry avg (cpu busy, mcycle)         ns             454.4      453.3      455.9
+isr->thread wake avg (semaphore)         ns            2161.3     2159.1     2162.8
+isr->thread wake max (semaphore)         ns            4857.9     4378.8     4896.9
+isr->thread wake avg (task notify)       ns            1892.3     1885.9     1892.5
+isr->thread wake max (task notify)       ns            1980.5     1980.5     4626.7
+heap alloc+free 32 B (sram)              ns            2738.5     2729.6     2768.1
+heap alloc+free 1 KiB (sram)             ns            2957.2     2946.5     2958.2
+heap alloc+free 256 KiB (psram)          ns            2983.7     2983.0     2994.2
+memcpy sram->sram (128 KiB x8)           MB/s           377.3      376.9      377.7
+memcpy psram->psram (1 MiB)              MB/s            53.6       53.6       53.6
+crc32 1 MiB (64 KiB sram x16)            MB/s            32.5       32.5       32.5
+integer kernel (per iteration)           ns              74.8       74.8       74.8
+checks: crc32=0x1db8cdd8 int=0x6ac225a8
+free heap: internal 484607, psram 33551752
+bench: done

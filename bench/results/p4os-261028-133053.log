@@ -1,0 +1,72 @@
+ESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0xc (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x41007a14
+Core1 Saved PC:0x4fc058dc
+SPI mode:DIO, clock div:1
+load:0x4ff33ce0,len:0x17a4
+load:0x4ff29ed0,len:0xf28
+load:0x4ff2cbd0,len:0x3454
+entry 0x4ff29eda
+I (13) boot: ESP-IDF v5.5 2nd stage bootloader
+I (14) boot: compile time Aug 14 2025 17:01:30
+I (15) boot: Multicore bootloader
+I (17) boot: chip revision: v1.0
+I (17) boot: efuse block revision: v0.3
+I (18) qio_mode: Enabling default flash chip QIO
+I (19) boot.esp32p4: SPI Speed      : 80MHz
+I (20) boot.esp32p4: SPI Mode       : QIO
+I (21) boot.esp32p4: SPI Flash Size : 16MB
+I (22) boot: Enabling RNG early entropy source...
+I (23) boot: Partition Table:
+I (24) boot: ## Label            Usage          Type ST Offset   Length
+I (26) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (27) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (28) boot:  2 factory          factory app      00 00 00010000 00700000
+I (29) boot:  3 storage          Unknown data     01 82 00710000 00600000
+I (30) boot: End of partition table
+I (31) esp_image: segment 0: paddr=00010020 vaddr=40000020 size=6a06ch (434284) map
+I (86) esp_image: segment 1: paddr=0007a094 vaddr=4ff00000 size=00ce0h (  3296) load
+I (89) esp_image: segment 2: paddr=0007ad7c vaddr=00000000 size=052bch ( 21180) 
+I (93) esp_image: segment 3: paddr=00080040 vaddr=41000040 size=b83a0h (754592) map
+I (187) boot: Loaded app from partition at offset 0x10000
+I (187) boot: Disabling RNG early entropy source...
+
+p4os 0.1.0 booting
+chip ESP32-P4 v1.0
+mac 30:ed:a0:e1:9d:99
+running on hart 0
+clock at boot: root=CPLL cpu/4 mem/1 sys/1 apb/1, cpu ~89 MHz
+clock now:     root=CPLL cpu/1 mem/2 sys/1 apb/2, cpu ~360 MHz
+psram: LDO VO2 before init ctrl=0x40200180 ana=0x76800000
+psram: MR0/1=0x8d30 MR4=0x4b20 MR8=0x4b vendor=0xd density=7
+psram: tuned phase 0 delay-line 13 (window 24 wide)
+psram: bus at 200 MHz
+psram: 32 MiB at 0x48000000, memtest ok in 15 ms
+sd: SDHC/SDXC card, 121942 MiB, rca 0xaaaa
+fs: FAT volume at sector 2048 (Fat32)
+tick check: 1040 ticks after 1 s sleep
+audio: I2S1 + ES8311 ready at 44100 Hz
+p4os> bench
+bench: p4os, cpu 359 MHz, 5 runs per test, median/min/max over runs
+test                                     unit          median        min        max
+ctx switch (sem ping-pong)               ns            2263.8     2227.8     2282.5
+yield (2 equal-prio threads)             ns            1283.5     1279.6     1293.3
+mutex lock+unlock (uncontended)          ns             698.2      698.1      698.3
+irq latency avg (thread blocked)         ns             542.7      533.4      582.3
+irq latency max (thread blocked)         ns            3250.0     2062.5     4937.5
+irq latency avg (cpu busy)               ns             555.5      550.4      561.7
+irq entry avg (cpu busy, mcycle)         ns             330.1      328.2      331.9
+isr->thread wake avg (semaphore)         ns            2544.5     2529.5     2561.6
+isr->thread wake max (semaphore)         ns            9011.1     5144.8    11568.2
+heap alloc+free 32 B (sram)              ns             369.0      364.8      373.8
+heap alloc+free 1 KiB (sram)             ns             457.9      452.1      461.0
+heap alloc+free 256 KiB (psram)          ns             363.0      357.5      366.0
+memcpy sram->sram (128 KiB x8)           MB/s           237.7      237.5      238.0
+memcpy psram->psram (1 MiB)              MB/s            47.8       46.7       48.6
+crc32 1 MiB (64 KiB sram x16)            MB/s            32.5       32.5       32.5
+integer kernel (per iteration)           ns              80.3       80.3       80.3
+checks: crc32=0x1db8cdd8 int=0x6ac225a8
+kernel tick worst alarm latency since boot: 15.31 us
+bench: done
+p4os> 
