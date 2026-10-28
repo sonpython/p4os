@@ -16,10 +16,19 @@ pub fn set(t: DateTime) {
     irq::free(|| unsafe { *BASE.0.get() = Some((secs, time::ticks())) });
 }
 
-pub fn now() -> Option<DateTime> {
+/// Set the clock from Unix seconds (network time is UTC).
+pub fn set_unix(secs: i64) {
+    irq::free(|| unsafe { *BASE.0.get() = Some((secs, time::ticks())) });
+}
+
+/// Seconds since the Unix epoch, when the clock has been set.
+pub fn unix_now() -> Option<i64> {
     let (secs, tick) = irq::free(|| unsafe { *BASE.0.get() })?;
-    let elapsed = time::ticks().wrapping_sub(tick) as i64 / 1000;
-    Some(from_unix(secs + elapsed))
+    Some(secs + time::ticks().wrapping_sub(tick) as i64 / 1000)
+}
+
+pub fn now() -> Option<DateTime> {
+    unix_now().map(from_unix)
 }
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {

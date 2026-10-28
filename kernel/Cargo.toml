@@ -16,4 +16,9 @@ smoltcp = { version = "0.12", default-features = false, features = ["alloc", "me
 p4os-sdk = { path = "../sdk" }
 p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
+p4os-net = { path = "../net" }
+# rustls-rustcrypto draws randomness through getrandom 0.2; the kernel
+# registers its hardware RNG as the custom backend (src/rng.rs).
+getrandom = { version = "0.2", features = ["custom"] }
+sha2 = { version = "0.10", default-features = false }
 fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "38b3a79", default-features = false, features = ["alloc", "lfn", "unicode"] }

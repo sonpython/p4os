@@ -121,6 +121,8 @@ pub trait Network {
     fn is_up(&self) -> bool;
     /// Start an HTTP GET in the background.
     fn fetch(&mut self, url: &str) -> FetchId;
+    /// Current state of a fetch. Once `Done` or `Failed` has been
+    /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
 }
 
