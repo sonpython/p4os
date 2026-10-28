@@ -381,6 +381,14 @@ impl System for KernelSystem {
         }
     }
 
+    fn config_remove(&mut self, key: &str) {
+        if let Err(e) = crate::config::update(|e| {
+            e.remove(key);
+        }) {
+            kprintln!("config: removing {} failed: {:?}", key, e);
+        }
+    }
+
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         crate::rng::fill(buf);
         true

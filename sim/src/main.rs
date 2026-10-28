@@ -6,6 +6,11 @@
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
 //!   config KEY VALUE (store a setting) | lock (lock the screen now)
+//!   mock URL_PART FILE [STATUS]
+//!
+//! `mock` answers every request whose URL contains URL_PART with FILE
+//! (relative paths start at the workspace root) instead of the network;
+//! the most recent matching mock wins.
 //!
 //! The screen starts in portrait (480x800); `--landscape` starts in 800x480.
 //!
@@ -145,13 +150,18 @@ impl Sim {
                 self.frame();
             }
             Some("shot") => self.shot(parts[1]),
-            Some("config") if parts.len() == 3 => {
-                self.sys.config_set(parts[1], parts[2]);
+            Some("config") if parts.len() >= 3 => {
+                self.sys.config_set(parts[1], &parts[2..].join(" "));
                 self.frame();
             }
             Some("lock") => {
                 self.desktop.lock_now(&mut self.sys);
                 self.frame();
+            }
+            Some("mock") => {
+                let file = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).join(parts[2]);
+                let status = parts.get(3).map_or(200, |_| num(3) as u16);
+                self.sys.mock(parts[1], status, file);
             }
             Some("rotate") => {
                 let o = self.sys.orientation().toggled();

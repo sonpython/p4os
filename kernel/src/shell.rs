@@ -5,8 +5,9 @@ use crate::sync::{Mutex, Semaphore};
 use crate::{clock, console, heap, irq, kprint, kprintln, time};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Room for `wifi save` with a 32-byte SSID and a 63-character password.
-const MAX_LINE: usize = 128;
+/// Room for `wifi save` with a 32-byte SSID and a 63-character password,
+/// and for `config set` with an OAuth client ID.
+const MAX_LINE: usize = 192;
 
 pub fn run(_: usize) {
     let mut line = [0u8; MAX_LINE];
@@ -26,13 +27,23 @@ pub fn run(_: usize) {
                 kprint!("\x08 \x08");
             }
             0x20..=0x7E if len < MAX_LINE => {
+                // Typed credentials are echoed as '*' so they stay out of
+                // serial logs.
+                let echo = if typing_hidden_value(&line[..len]) { b'*' } else { byte };
                 line[len] = byte;
                 len += 1;
-                console::write_bytes(&[byte]);
+                console::write_bytes(&[echo]);
             }
             _ => {}
         }
     }
+}
+
+/// True once `typed` is `config set KEY ` for a key whose value is masked.
+fn typing_hidden_value(typed: &[u8]) -> bool {
+    let Some(rest) = typed.strip_prefix(b"config set ") else { return false };
+    let Some(space) = rest.iter().position(|&b| b == b' ') else { return false };
+    core::str::from_utf8(&rest[..space]).is_ok_and(p4os_sdk::config::is_masked)
 }
 
 /// Run a command and return its output instead of printing it. Used by
@@ -49,13 +60,15 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi lock get smpdemo apps run pmp screenshot"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp screenshot"
         ),
         "flash" => crate::flash::diagnose(),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
         c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
         "config" | "config list" => config_list(),
+        c if c.starts_with("config set ") => config_set(c["config set ".len()..].trim()),
+        c if c.starts_with("config unset ") => config_unset(c["config unset ".len()..].trim()),
         c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
             Ok(n) => config_stress(n),
             Err(_) => kprintln!("usage: config stress N"),
@@ -505,6 +518,43 @@ fn config_list() {
     for (k, v) in entries {
         let shown = if p4os_sdk::config::is_masked(&k) { "[set]" } else { v.as_str() };
         kprintln!("{} = {}", k, shown);
+    }
+}
+
+/// `config set KEY VALUE`: store a setting. Masked values (credentials)
+/// are never echoed back; `lock.*` keys are refused so the passcode only
+/// changes through Settings or `lock reset`.
+fn config_set(args: &str) {
+    let Some((key, value)) = args.split_once(' ') else {
+        kprintln!("usage: config set KEY VALUE");
+        return;
+    };
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
+    let value = value.trim();
+    if let Err(e) = p4os_sdk::config::check_entry(key, value) {
+        kprintln!("config: {} rejected: {:?}", key, e);
+        return;
+    }
+    match crate::config::set(key, value) {
+        Ok(()) if p4os_sdk::config::is_masked(key) => kprintln!("{} = [set]", key),
+        Ok(()) => kprintln!("{} = {}", key, value),
+        Err(e) => kprintln!("config: saving {} failed: {:?}", key, e),
+    }
+}
+
+fn config_unset(key: &str) {
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
+    match crate::config::update(|e| {
+        e.remove(key);
+    }) {
+        Ok(()) => kprintln!("{} removed", key),
+        Err(e) => kprintln!("config: removing {} failed: {:?}", key, e),
     }
 }
 

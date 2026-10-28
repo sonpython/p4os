@@ -12,7 +12,8 @@
 //! image, and the vendor's JC4880P443 board config and schematic (LCD reset
 //! on GPIO5 -> panel RESX, backlight boost enable on GPIO23).
 
-use crate::sync::{Mutex, Semaphore};
+use crate::sched::{self, notify_bits};
+use crate::sync::Mutex;
 use crate::{gpio, irq, kprintln, mmio, psram, soc, systimer};
 use alloc::alloc::{alloc_zeroed, Layout};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -90,7 +91,10 @@ const DMAC: usize = soc::DW_GDMA;
 const CH: usize = DMAC + 0x100; // channel index 0
 
 const IRQ_LINE: usize = 18;
+/// Fast interrupt (see `irq`): the next frame's DMA is started from the
+/// handler, so thread-side critical sections must not delay it.
 const IRQ_LEVEL: u32 = 6;
+const _: () = assert!(IRQ_LEVEL > irq::KERNEL_LEVEL);
 
 /// Non-cacheable alias of internal SRAM, used for the DMA descriptor.
 const SRAM_UNCACHED_OFFSET: usize = 0x4000_0000;
@@ -108,7 +112,9 @@ static FRONT: AtomicUsize = AtomicUsize::new(0);
 static PENDING: AtomicUsize = AtomicUsize::new(0);
 static FRAMES: AtomicU32 = AtomicU32::new(0);
 static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
-static FLIPPED: Semaphore = Semaphore::new(0);
+/// Thread blocked in `present`, notified when its buffer goes on screen.
+/// Written before `PENDING`, so the handler that takes `PENDING` sees it.
+static FLIP_WAITER: AtomicUsize = AtomicUsize::new(0);
 /// `FRAME_*` flags of the frame waiting to flip and of the one on screen.
 static PENDING_INFO: AtomicU32 = AtomicU32::new(0);
 static FRONT_INFO: AtomicU32 = AtomicU32::new(0);
@@ -339,7 +345,7 @@ fn on_frame_done() {
     if pending != 0 {
         FRONT_INFO.store(PENDING_INFO.load(Ordering::Acquire), Ordering::Release);
         FRONT.store(pending, Ordering::Release);
-        FLIPPED.release();
+        sched::notify(FLIP_WAITER.load(Ordering::Relaxed), notify_bits::DISPLAY_FLIP);
     }
     FRAMES.fetch_add(1, Ordering::Relaxed);
     dma_start(FRONT.load(Ordering::Acquire));
@@ -402,8 +408,9 @@ pub fn present_with(fb: &Framebuffer, info: u32) {
     psram::cache_writeback(fb.ptr as usize, FB_BYTES);
     let _gate = FLIP_GATE.lock();
     PENDING_INFO.store(info, Ordering::Release);
+    FLIP_WAITER.store(sched::my_id(), Ordering::Relaxed);
     PENDING.store(fb.ptr as usize, Ordering::Release);
-    FLIPPED.acquire();
+    sched::wait_notify(notify_bits::DISPLAY_FLIP);
 }
 
 /// Run `f` on the pixels on screen (panel order, `WIDTH` x `HEIGHT`) and

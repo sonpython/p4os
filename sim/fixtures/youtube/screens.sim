@@ -1,0 +1,108 @@
+# Screenshots of the YouTube app from hand-made fixtures: no network access,
+# no Google account. From the workspace root:
+#   cargo sim --script sim/fixtures/youtube/screens.sim
+# Screen: 480x800; the app area starts at y=92 and the tab bar is the
+# bottom 64 pixels (Home x=60, Search x=180, Library x=300, Account x=420).
+
+# Thumbnails (synthetic, see make-thumbs.py).
+mock i.ytimg.com/vi/ sim/fixtures/youtube/thumbs/p4Os_Vid001.jpg
+mock vi/p4Os_ChanAAA/ sim/fixtures/youtube/thumbs/p4Os_ChanAAA.jpg
+mock vi/p4Os_ChanCCC/ sim/fixtures/youtube/thumbs/p4Os_ChanCCC.jpg
+mock vi/p4Os_ChanGGG/ sim/fixtures/youtube/thumbs/p4Os_ChanGGG.jpg
+mock vi/p4Os_Feed01/ sim/fixtures/youtube/thumbs/p4Os_Feed01.jpg
+mock vi/p4Os_Feed02/ sim/fixtures/youtube/thumbs/p4Os_Feed02.jpg
+mock vi/p4Os_Feed03/ sim/fixtures/youtube/thumbs/p4Os_Feed03.jpg
+mock vi/p4Os_Feed04/ sim/fixtures/youtube/thumbs/p4Os_Feed04.jpg
+mock vi/p4Os_Feed05/ sim/fixtures/youtube/thumbs/p4Os_Feed05.jpg
+mock vi/p4Os_Feed06/ sim/fixtures/youtube/thumbs/p4Os_Feed06.jpg
+mock vi/p4Os_Feed07/ sim/fixtures/youtube/thumbs/p4Os_Feed07.jpg
+mock vi/p4Os_Src001/ sim/fixtures/youtube/thumbs/p4Os_Src001.jpg
+mock vi/p4Os_Src002/ sim/fixtures/youtube/thumbs/p4Os_Src002.jpg
+mock vi/p4Os_Src003/ sim/fixtures/youtube/thumbs/p4Os_Src003.jpg
+mock vi/p4Os_Src004/ sim/fixtures/youtube/thumbs/p4Os_Src004.jpg
+mock vi/p4Os_Src005/ sim/fixtures/youtube/thumbs/p4Os_Src005.jpg
+mock vi/p4Os_Src006/ sim/fixtures/youtube/thumbs/p4Os_Src006.jpg
+mock vi/p4Os_Vid001/ sim/fixtures/youtube/thumbs/p4Os_Vid001.jpg
+mock vi/p4Os_Vid002/ sim/fixtures/youtube/thumbs/p4Os_Vid002.jpg
+mock vi/p4Os_Vid003/ sim/fixtures/youtube/thumbs/p4Os_Vid003.jpg
+mock vi/p4Os_Vid004/ sim/fixtures/youtube/thumbs/p4Os_Vid004.jpg
+mock vi/p4Os_Vid005/ sim/fixtures/youtube/thumbs/p4Os_Vid005.jpg
+mock vi/p4Os_Vid006/ sim/fixtures/youtube/thumbs/p4Os_Vid006.jpg
+mock vi/p4Os_Vid007/ sim/fixtures/youtube/thumbs/p4Os_Vid007.jpg
+mock vi/p4Os_Vid008/ sim/fixtures/youtube/thumbs/p4Os_Vid008.jpg
+
+# Data API answers.
+mock chart=mostPopular apps/src/youtube/fixtures/trending.json
+mock /youtube/v3/search? apps/src/youtube/fixtures/search.json
+mock /youtube/v3/videos?part=contentDetails,statistics apps/src/youtube/fixtures/videos.json
+mock /youtube/v3/videos?part=snippet,contentDetails,statistics&id= apps/src/youtube/fixtures/videos.json
+mock /youtube/v3/subscriptions? apps/src/youtube/fixtures/subscriptions.json
+mock /youtube/v3/channels? apps/src/youtube/fixtures/channels.json
+mock playlistId=UUp4osChannelAAAAAAAAAAA apps/src/youtube/fixtures/uploads-1.json
+mock playlistId=UUp4osChannelCCCCCCCCCCC apps/src/youtube/fixtures/uploads-2.json
+mock playlistId=UUp4osChannelGGGGGGGGGGG apps/src/youtube/fixtures/uploads-3.json
+mock /youtube/v3/playlists? apps/src/youtube/fixtures/playlists.json
+# Google sign-in: a device code, then "authorization_pending" while the
+# code is on screen.
+mock oauth2.googleapis.com/device/code apps/src/youtube/fixtures/device-code.json
+mock oauth2.googleapis.com/token apps/src/youtube/fixtures/token-pending.json 428
+
+# 0. Nothing configured: the "no API key" message.
+launch youtube
+wait 200
+shot docs/screenshots/youtube-no-key.png
+
+# 1. Signed out with an API key: trending.
+config youtube.api_key fixture-api-key
+launch youtube
+wait 1500
+shot docs/screenshots/youtube-trending.png
+
+# 2. Sign-in: the device code with its QR code.
+config youtube.client_id fixture-client.apps.googleusercontent.com
+config youtube.client_secret fixture-secret
+launch youtube
+tap 420 768
+tap 180 266
+wait 300
+shot docs/screenshots/youtube-device-code.png
+
+# 3. Signed in: the subscriptions feed.
+mock oauth2.googleapis.com/token apps/src/youtube/fixtures/token.json
+config youtube.refresh_token fixture-refresh-token
+launch youtube
+wait 1500
+shot docs/screenshots/youtube-feed.png
+
+# 4. Video detail page, then the playback placeholder.
+tap 300 200
+wait 800
+shot docs/screenshots/youtube-detail.png
+tap 100 594
+wait 200
+shot docs/screenshots/youtube-player.png
+
+# 5. Search.
+launch youtube
+tap 180 768
+tap 150 126
+type esp32 rust
+key enter
+wait 1500
+shot docs/screenshots/youtube-search.png
+
+# 6. Library: playlists.
+tap 300 768
+tap 240 124
+wait 1000
+shot docs/screenshots/youtube-library.png
+
+# 7. Landscape: feed, and the detail page with picture and text side by side.
+launch youtube
+rotate
+wait 1500
+shot docs/screenshots/youtube-landscape.png
+tap 400 200
+wait 800
+shot docs/screenshots/youtube-landscape-detail.png
+rotate

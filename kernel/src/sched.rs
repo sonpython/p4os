@@ -13,6 +13,10 @@
 //! thread it outranks is told to reschedule, through an inter-processor
 //! interrupt if that is the other core. The tick runs on core 0 only and
 //! accounts time for both cores.
+//!
+//! Each thread also has a 32-bit notification word (`notify`,
+//! `wait_notify`), the cheapest way for an interrupt handler to wake one
+//! known thread, and the only one open to fast handlers (see `irq`).
 
 use crate::boot::TrapFrame;
 use crate::irq::{self, HART_COUNT};
@@ -80,6 +84,25 @@ impl Thread {
 struct Scheduler {
     threads: [Option<Thread>; MAX_THREADS],
     current: [Option<usize>; HART_COUNT],
+    /// Ids of threads in `State::Ready` and `State::Sleeping`, so picking
+    /// the next thread and the tick only visit the threads concerned. Kept
+    /// in step with `Thread::state` by `set_state`.
+    ready: u32,
+    sleeping: u32,
+}
+
+impl Scheduler {
+    fn set_state(&mut self, id: usize, state: State) {
+        let bit = 1 << id;
+        self.ready &= !bit;
+        self.sleeping &= !bit;
+        match state {
+            State::Ready => self.ready |= bit,
+            State::Sleeping { .. } => self.sleeping |= bit,
+            State::Blocked | State::Exited => {}
+        }
+        self.threads[id].as_mut().expect("no such thread").state = state;
+    }
 }
 
 // Thread stacks and frames are only reached through the scheduler lock.
@@ -88,6 +111,8 @@ unsafe impl Send for Scheduler {}
 static SCHED: SpinLock<Scheduler> = SpinLock::new(Scheduler {
     threads: [const { None }; MAX_THREADS],
     current: [None; HART_COUNT],
+    ready: 0,
+    sleeping: 0,
 });
 
 static ONLINE: [AtomicBool; HART_COUNT] = [const { AtomicBool::new(false) }; HART_COUNT];
@@ -140,6 +165,8 @@ pub fn spawn_on(
         let mut s = SCHED.lock();
         reap_exited(&mut s, &mut dead);
         let slot = s.threads.iter().position(Option::is_none).expect("thread table full");
+        NOTIFY_PENDING[slot].store(0, Ordering::Relaxed);
+        NOTIFY_WAITING[slot].store(0, Ordering::Relaxed);
         s.threads[slot] = Some(Thread {
             _stack: stack_mem,
             name,
@@ -155,6 +182,7 @@ pub fn spawn_on(
             on_cpu: None,
             last_cpu: None,
         });
+        s.set_state(slot, State::Ready);
         kick(&s, priority, affinity);
         slot
     };
@@ -191,18 +219,14 @@ pub fn exit_current() -> ! {
 }
 
 extern "C" fn thread_exit() -> ! {
-    if let Some(t) = current_mut(&mut SCHED.lock()) {
-        t.state = State::Exited;
+    {
+        let mut s = SCHED.lock();
+        if let Some(cur) = s.current[irq::hart_id()] {
+            s.set_state(cur, State::Exited);
+        }
     }
     yield_now();
     unreachable!("exited thread was scheduled again")
-}
-
-/// The thread running on the calling core. Interrupts are masked while the
-/// lock is held, so the core cannot change under the caller.
-fn current_mut(s: &mut Scheduler) -> Option<&mut Thread> {
-    let cur = s.current[irq::hart_id()]?;
-    s.threads[cur].as_mut()
 }
 
 /// Hand the calling core to the scheduler. Never returns to the boot stack.
@@ -238,43 +262,44 @@ pub fn yield_now() {
 
 pub fn sleep_ms(ms: u32) {
     {
+        // Kernel-level interrupts, the only ones that may switch threads,
+        // are masked while the lock is held, so the core cannot change.
         let mut s = SCHED.lock();
-        let t = current_mut(&mut s).expect("sleep outside a thread");
-        t.state = State::Sleeping { until: time::ticks().wrapping_add(ms) };
+        let cur = s.current[irq::hart_id()].expect("sleep outside a thread");
+        s.set_state(cur, State::Sleeping { until: time::ticks().wrapping_add(ms) });
     }
     yield_now();
 }
 
-/// Blocking primitives build on `block_unless` and `wake_one`. Their own state
-/// is protected by the scheduler lock, which both run the closure under.
+/// Blocking primitives build on `block_unless` and `wake_one`.
 ///
-/// `block_unless` calls `try_take`. If that fails, `add_waiter(current
-/// thread id)` runs and the thread is marked blocked in the same critical
-/// section, so a concurrent `wake` cannot be lost; the caller then calls
-/// `yield_now` and retries. Boot code may use it before the scheduler runs
-/// as long as it never has to wait.
-pub fn block_unless(try_take: impl FnOnce() -> bool, add_waiter: impl FnOnce(usize)) -> bool {
+/// `block_unless` runs `try_take(current thread id)` under the scheduler
+/// lock. If it fails, the thread is marked blocked in the same critical
+/// section, so a `wake_one` that follows cannot be lost; the caller then
+/// calls `yield_now` and retries. `try_take` must register the thread as
+/// a waiter before its last check of the primitive's state (see
+/// `sync::Semaphore`). Boot code may use it before the scheduler runs as
+/// long as it never has to wait.
+pub fn block_unless(try_take: impl FnOnce(usize) -> bool) -> bool {
     let mut s = SCHED.lock();
-    if try_take() {
+    let cur = s.current[irq::hart_id()].expect("block outside a thread");
+    if try_take(cur) {
         return true;
     }
-    let cur = s.current[irq::hart_id()].expect("block outside a thread");
-    add_waiter(cur);
-    s.threads[cur].as_mut().unwrap().state = State::Blocked;
+    s.set_state(cur, State::Blocked);
     false
 }
 
-/// Run `f` under the scheduler lock; it updates the primitive and returns
-/// its waiter mask (one bit per thread id). The most important thread in
-/// the mask that is still blocked is made ready and its bit cleared; bits
-/// of threads no longer blocked are dropped. Costs nothing beyond the lock
-/// when there are no waiters. Safe from interrupt handlers.
-pub fn wake_one<'a>(f: impl FnOnce() -> &'a mut u32) {
+/// Under the scheduler lock, make the most important thread in `waiters`
+/// (one bit per thread id) that is still blocked ready and clear its bit;
+/// bits of threads no longer blocked are dropped. Safe from kernel-level
+/// interrupt handlers.
+pub fn wake_one(waiters: &AtomicU32) {
     let mut guard = SCHED.lock();
     let s = &mut *guard;
-    let mask = f();
     let mut best: Option<(usize, u8)> = None;
-    let mut bits = *mask;
+    let mut stale = 0;
+    let mut bits = waiters.load(Ordering::Relaxed);
     while bits != 0 {
         let id = bits.trailing_zeros() as usize;
         bits &= bits - 1;
@@ -284,13 +309,21 @@ pub fn wake_one<'a>(f: impl FnOnce() -> &'a mut u32) {
                     best = Some((id, t.priority));
                 }
             }
-            _ => *mask &= !(1 << id),
+            _ => stale |= 1 << id,
         }
     }
-    let Some((id, _)) = best else { return };
-    *mask &= !(1 << id);
-    let t = s.threads[id].as_mut().unwrap();
-    t.state = State::Ready;
+    let Some((id, _)) = best else {
+        waiters.fetch_and(!stale, Ordering::Relaxed);
+        return;
+    };
+    waiters.fetch_and(!(stale | 1 << id), Ordering::Relaxed);
+    make_ready(s, id);
+}
+
+/// Make thread `id` ready and find a core for it.
+fn make_ready(s: &mut Scheduler, id: usize) {
+    s.set_state(id, State::Ready);
+    let t = s.threads[id].as_ref().unwrap();
     let (priority, affinity) = (t.priority, t.affinity);
     kick(s, priority, affinity);
 }
@@ -311,7 +344,9 @@ fn kick(s: &Scheduler, priority: u8, affinity: Option<usize>) {
     let me = irq::hart_id();
     let mut best: Option<(usize, i16)> = None;
     for hart in 0..HART_COUNT {
-        if !is_online(hart) || affinity.is_some_and(|a| a != hart) {
+        // Relaxed is enough under the lock: a core sets its flag before its
+        // first switch takes the lock, and that switch schedules anyway.
+        if !ONLINE[hart].load(Ordering::Relaxed) || affinity.is_some_and(|a| a != hart) {
             continue;
         }
         let running = running_priority(s, hart);
@@ -331,7 +366,9 @@ fn kick(s: &Scheduler, priority: u8, affinity: Option<usize>) {
 /// out; anything else needs an interrupt (to the calling core too, since
 /// core 1 has no tick of its own to notice the flag).
 fn resched(hart: usize) {
-    NEED_RESCHED[hart].store(true, Ordering::SeqCst);
+    // `send_ipi` fences before raising the line, and without an IPI this
+    // core reads the flag itself, so no ordering is needed here.
+    NEED_RESCHED[hart].store(true, Ordering::Relaxed);
     if hart != irq::hart_id() || !irq::in_trap() {
         smp::send_ipi(hart);
     }
@@ -342,12 +379,137 @@ pub fn take_resched() -> bool {
     // A plain load first keeps the common "nothing pending" path free of
     // an atomic read-modify-write. A request landing between the load and
     // the store is served by the switch the caller is about to do.
+    // A flag set by the other core arrives with an IPI whose handler fences
+    // before this runs; one missed here is served by that pending IPI.
     let flag = &NEED_RESCHED[irq::hart_id()];
-    if !flag.load(Ordering::SeqCst) {
+    if !flag.load(Ordering::Relaxed) {
         return false;
     }
-    flag.store(false, Ordering::SeqCst);
+    // The interrupted code is in a kernel critical section, possibly
+    // holding the scheduler lock: a fast interrupt, or a kernel-level one
+    // taken just before a threshold raise took effect. Switching now would
+    // also hand the raised threshold to the next thread. Leave the request
+    // pending and raise the (kernel-level) IPI, which is taken, and
+    // switches, as soon as the critical section ends.
+    if irq::kernel_masked() {
+        smp::send_ipi(irq::hart_id());
+        return false;
+    }
+    flag.store(false, Ordering::Relaxed);
     true
+}
+
+// --- task notifications ---------------------------------------------------
+
+/// Notification bits, one per signal source, so that one thread can wait
+/// for several sources at once.
+pub mod notify_bits {
+    pub const DISPLAY_FLIP: u32 = 1 << 0;
+    pub const AUDIO_DMA: u32 = 1 << 1;
+    pub const CONSOLE_RX: u32 = 1 << 2;
+    pub const BENCH: u32 = 1 << 31;
+}
+
+/// Pending notification bits per thread id. Kept outside the scheduler
+/// lock so `notify` can post without it.
+static NOTIFY_PENDING: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+/// Bits a thread blocked in `wait_notify` waits for, 0 when it is not
+/// waiting. Set by the thread and cleared by its waker, both under the
+/// scheduler lock.
+static NOTIFY_WAITING: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+/// Threads whose wake-up `notify` handed to the IPI handler because the
+/// scheduler lock could be held by the code it interrupted.
+static DEFERRED_WAKE: AtomicU32 = AtomicU32::new(0);
+
+const _: () = assert!(MAX_THREADS <= 32);
+
+/// Id of the calling thread, to hand to whoever will `notify` it.
+pub fn my_id() -> usize {
+    current_id().expect("not called from a thread")
+}
+
+/// Post `bits` to thread `id` and wake it if it waits for any of them.
+///
+/// Safe from any context, fast interrupt handlers included. Costs no
+/// scheduler lock when the thread is not waiting for these bits and one
+/// acquisition when it is. When kernel-level interrupts are masked (the
+/// caller, or the code a fast handler interrupted, may hold the scheduler
+/// lock) the wake-up is deferred to a self-IPI, which runs as soon as that
+/// critical section ends.
+pub fn notify(id: usize, bits: u32) {
+    NOTIFY_PENDING[id].fetch_or(bits, Ordering::SeqCst);
+    // Pairs with `wait_notify`, which publishes its mask before checking
+    // the pending bits: either it sees these bits or this sees it waiting.
+    if NOTIFY_WAITING[id].load(Ordering::SeqCst) & bits == 0 {
+        return;
+    }
+    if irq::kernel_masked() {
+        DEFERRED_WAKE.fetch_or(1 << id, Ordering::SeqCst);
+        smp::send_ipi(irq::hart_id());
+        return;
+    }
+    wake_notified(&mut SCHED.lock(), id);
+}
+
+/// Make thread `id` ready if it is blocked in `wait_notify` and one of the
+/// bits it waits for is pending.
+fn wake_notified(s: &mut Scheduler, id: usize) {
+    let waiting = NOTIFY_WAITING[id].load(Ordering::Relaxed);
+    if waiting == 0 || NOTIFY_PENDING[id].load(Ordering::Relaxed) & waiting == 0 {
+        return;
+    }
+    if s.threads[id].as_ref().is_none_or(|t| t.state != State::Blocked) {
+        return;
+    }
+    NOTIFY_WAITING[id].store(0, Ordering::Relaxed);
+    make_ready(s, id);
+}
+
+/// Perform the wake-ups `notify` deferred. Called from the (kernel-level)
+/// IPI handler.
+pub fn wake_deferred() {
+    let mut ids = DEFERRED_WAKE.swap(0, Ordering::SeqCst);
+    if ids == 0 {
+        return;
+    }
+    let mut s = SCHED.lock();
+    while ids != 0 {
+        let id = ids.trailing_zeros() as usize;
+        ids &= ids - 1;
+        wake_notified(&mut s, id);
+    }
+}
+
+/// Block until one of the bits in `mask` is notified, then clear and return
+/// the pending bits of `mask`. Bits outside `mask` stay pending. Bits that
+/// arrived before the call count, so a notification is never lost between
+/// a thread arming its source and waiting.
+pub fn wait_notify(mask: u32) -> u32 {
+    assert!(mask != 0, "wait_notify with an empty mask");
+    // Known after the first pass: a woken thread consumes its bits without
+    // taking the lock again (only the thread itself clears them).
+    let mut me: Option<usize> = None;
+    loop {
+        if let Some(id) = me {
+            let got = NOTIFY_PENDING[id].fetch_and(!mask, Ordering::SeqCst) & mask;
+            if got != 0 {
+                return got;
+            }
+        }
+        {
+            let mut s = SCHED.lock();
+            let id = s.current[irq::hart_id()].expect("wait outside a thread");
+            me = Some(id);
+            NOTIFY_WAITING[id].store(mask, Ordering::SeqCst);
+            let got = NOTIFY_PENDING[id].fetch_and(!mask, Ordering::SeqCst) & mask;
+            if got != 0 {
+                NOTIFY_WAITING[id].store(0, Ordering::Relaxed);
+                return got;
+            }
+            s.set_state(id, State::Blocked);
+        }
+        yield_now();
+    }
 }
 
 /// Share of the last full second core `hart` spent outside its idle thread.
@@ -358,14 +520,19 @@ pub fn cpu_load(hart: usize) -> f32 {
 /// Whether a ready thread other than the one `hart` runs could take over
 /// from a thread of `priority` there.
 fn has_contender(s: &Scheduler, hart: usize, priority: u8) -> bool {
-    s.threads.iter().enumerate().any(|(i, t)| {
-        t.as_ref().is_some_and(|t| {
-            s.current[hart] != Some(i)
-                && t.state == State::Ready
-                && t.on_cpu.is_none()
-                && t.allowed_on(hart)
-                && t.priority >= priority
-        })
+    let running = s.current[hart].map_or(0, |c| 1 << c);
+    ids(s.ready & !running).any(|i| {
+        let t = s.threads[i].as_ref().unwrap();
+        t.on_cpu.is_none() && t.allowed_on(hart) && t.priority >= priority
+    })
+}
+
+/// Thread ids set in `mask`, lowest first.
+fn ids(mut mask: u32) -> impl Iterator<Item = usize> {
+    core::iter::from_fn(move || {
+        let id = mask.trailing_zeros() as usize;
+        mask &= mask.wrapping_sub(1);
+        (id < 32).then_some(id)
     })
 }
 
@@ -374,13 +541,10 @@ fn has_contender(s: &Scheduler, hart: usize, priority: u8) -> bool {
 pub fn on_tick(now: u32) {
     let mut guard = SCHED.lock();
     let s = &mut *guard;
-    for i in 0..MAX_THREADS {
-        let Some(t) = s.threads[i].as_mut() else { continue };
-        if let State::Sleeping { until } = t.state {
+    for i in ids(s.sleeping) {
+        if let State::Sleeping { until } = s.threads[i].as_ref().unwrap().state {
             if (now.wrapping_sub(until) as i32) >= 0 {
-                t.state = State::Ready;
-                let (priority, affinity) = (t.priority, t.affinity);
-                kick(s, priority, affinity);
+                make_ready(s, i);
             }
         }
     }
@@ -419,8 +583,7 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
         if unsafe { t.stack_bottom.read() } != STACK_CANARY {
             kprintln!("*** stack overflow in thread '{}' on hart {}", t.name, hart);
             crate::halt();
-        }
-    }
+        }    }
 
     let next = pick_next(s, hart);
     s.current[hart] = Some(next);
@@ -429,8 +592,9 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
             let t = s.threads[cur].as_mut().unwrap();
             save_fp(t);
             t.on_cpu = None;
-            // Preempted but still runnable: another core may be free for it.
-            if t.state == State::Ready {
+            // Preempted but still runnable: another core may be free for it
+            // (not for an idle thread, which is pinned to this core).
+            if t.state == State::Ready && t.priority != PRIORITY_IDLE {
                 let (priority, affinity) = (t.priority, t.affinity);
                 kick(s, priority, affinity);
             }
@@ -447,16 +611,16 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
 /// Highest-priority ready thread that may run on `hart` and is not running
 /// elsewhere, round-robin among equals starting after the current one.
 fn pick_next(s: &Scheduler, hart: usize) -> usize {
-    let start = s.current[hart].map_or(0, |c| c + 1);
+    let start = s.current[hart].map_or(0, |c| c + 1) % MAX_THREADS;
+    let before = (1u32 << start) - 1;
     let mut best: Option<(usize, u8)> = None;
-    for k in 0..MAX_THREADS {
-        let i = (start + k) % MAX_THREADS;
-        if let Some(t) = &s.threads[i] {
-            let runnable =
-                t.state == State::Ready && t.on_cpu.is_none_or(|c| c == hart) && t.allowed_on(hart);
-            if runnable && best.is_none_or(|(_, p)| t.priority > p) {
-                best = Some((i, t.priority));
-            }
+    // Ids from `start` up first, then the rest, so the first of several
+    // equals found is the next one round-robin.
+    for i in ids(s.ready & !before).chain(ids(s.ready & before)) {
+        let t = s.threads[i].as_ref().unwrap();
+        let runnable = t.on_cpu.is_none_or(|c| c == hart) && t.allowed_on(hart);
+        if runnable && best.is_none_or(|(_, p)| t.priority > p) {
+            best = Some((i, t.priority));
         }
     }
     best.expect("no runnable thread (idle missing?)").0

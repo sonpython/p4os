@@ -77,7 +77,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `screenshot [fast|raw]` / `screenshot sd [TÊN]` (chụp màn hình, xem mục Chụp màn hình ngay trên board). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi và mã khoá màn hình chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `screenshot [fast|raw]` / `screenshot sd [TÊN]` (chụp màn hình, xem mục Chụp màn hình ngay trên board). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -92,7 +92,7 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
 
 - Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
-- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá), và các khoá `youtube.*` của app YouTube (xem mục App YouTube). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
 - Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
 - Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
 
@@ -144,11 +144,20 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - Lúc nhảy vào kernel, ROM chạy core 1 trên stack riêng ngay dưới 0x4FF3EFC0. Vùng này nằm trên `_heap_end`, nên heap không bị ghi đè.
 - CLIC của từng core nằm ở cùng địa chỉ 0x20800000, và mỗi core có ma trận ngắt riêng. `irq::attach` gắn ngắt vào core đang gọi. Tick 1 kHz chạy trên core 0 và tính giờ cho cả hai core.
 - Ngắt liên core (IPI) dùng nguồn FROM_CPU 79 + hart, gắn vào đường CLIC 47 (driver lấy đường từ 16 trở lên, `bench` dùng đường 20). Ghi 1 vào `HP_SYS + 0x10 + 4·hart` để báo, bên nhận ghi 0 để xoá.
-- Scheduler, heap, `Semaphore`/`Mutex`, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): tắt ngắt trên core hiện tại rồi chờ một atomic LR/SC. `irq::free` chỉ chặn được core hiện tại. Spinlock phải là biến static trong SRAM.
+- Scheduler, heap, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): nâng ngưỡng CLIC để chặn ngắt mức kernel trên core hiện tại (xem mục dưới), rồi chờ một atomic LR/SC. `Semaphore`/`Mutex` chỉ vào scheduler khi phải chờ hoặc khi có thread đang chờ; lấy và trả khi không tranh chấp chỉ là atomic. `irq::free` chặn mọi ngắt nhưng chỉ trên core hiện tại. Spinlock phải là biến static trong SRAM.
 - Console không giữ ngắt tắt trong lúc chờ USB rút FIFO (có thể mất ~1 ms): các thread xếp hàng bằng một `Mutex`; trình xử lý ngắt và code đang giữ spinlock in thẳng ra.
 - Ghi/xoá flash tạm dừng cache, mà core kia vẫn chạy code từ flash qua cache đó. Vì vậy `smp::with_other_core_parked` gửi IPI để core kia vào một vòng lặp nằm trong SRAM (`.sram_text`, ngắt tắt, stack ngắt ở SRAM), chờ nó báo đã vào rồi mới tạm dừng cache. Trong lúc xoá một sector (~45 ms) ngắt bị tắt, nên `irq` sau khi lưu cài đặt báo độ trễ tick cỡ 48 ms; ngoài lúc đó độ trễ dưới 50 µs.
 - `mcycle` là bộ đếm riêng của từng core (core 1 bắt đầu đếm muộn hơn khoảng 1 giây), nên `bench` ghim mọi thread của nó vào core 0.
 - `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
+
+## Ngắt: mức kernel, mức nhanh và task notification
+
+- Mức 1..3 (`irq::KERNEL_LEVEL`) là **mức kernel**: handler được dùng spinlock, `Semaphore::release`, `sched::notify`. Critical section của kernel (mọi `SpinLock`) chỉ nâng ngưỡng CLIC (`0x20800008`) lên mức 3 thay vì tắt `mstatus.MIE`, nên ngắt mức 4..7 vẫn chạy khi thread đang giữ lock.
+- Mức 4..7 là **mức nhanh**: màn hình (page flip, mức 6) và audio (DMA xong, mức 5). Handler mức nhanh **không được lấy lock nào** (spinlock, semaphore, mutex, cấp phát, `mmio::set_bits`/`modify`): chỉ đọc/ghi thanh ghi, atomic và gọi `sched::notify`. Nếu code bị ngắt đang trong critical section, `notify` để việc đánh thức lại cho IPI tự gửi tới chính core đó (mức 1), chạy ngay khi critical section kết thúc.
+- Trap không lồng nhau: ngắt nhanh vẫn phải chờ handler đang chạy. Nó chỉ không còn phải chờ critical section phía thread.
+- `sched::notify(id, bits)` / `sched::wait_notify(mask)`: mỗi thread có 32 bit notification, đánh thức đúng một thread với tối đa một lần lấy scheduler lock. Bit dùng chung khai báo ở `sched::notify_bits`. Màn hình, audio và console RX dùng cơ chế này thay cho semaphore.
+- Chi phí đo bằng `bench`: vào+ra critical section bằng ngưỡng CLIC mất ~151 ns, so với ~53 ns khi bật/tắt `MIE` (ghi thanh ghi rồi đọc lại để ngưỡng có hiệu lực). `Semaphore`/`Mutex` không tranh chấp chỉ dùng atomic (mutex lock+unlock ~365 ns, trước đây ~620 ns).
+- `irq::attach` báo lỗi nếu đường CLIC đã có handler khác (lỗi cũ: IPI và alarm của `bench` dùng chung đường 20 làm `bench` treo).
 - `smpdemo` đo được 1 thread 1116 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 2 lần. `config stress 50` chạy song song với tải trên cả hai core: 100 lần lưu đều đúng và không treo.
 
 ## Heap
@@ -185,3 +194,35 @@ Một bẫy với systimer: comparator chỉ kích hoạt khi bộ đếm **bằ
 - Số ngẫu nhiên lấy từ thanh ghi RNG `0x5011_01A4`, trộn với bộ đếm chu kỳ qua SHA-256 (`kernel/src/rng.rs`). Lúc chạy, nguồn nhiễu SAR ADC không bật, nên entropy chỉ đến từ dao động RC.
 - Đo trên board (360 MHz): handshake TLS 1.3 mất 0,25–0,9 giây, TLS 1.2 với RSA-4096 hoặc ECDSA P-384 mất 1,1–1,6 giây. Một lần tải HTTPS dùng thêm khoảng 45 KB SRAM lúc cao nhất. Stack của thread `net` dùng khoảng 16 KB trên 48 KB. Image firmware tăng từ 1,2 MB lên 2,4 MB (phân vùng `factory` có 7 MB).
 - Giới hạn: không có session resumption và keep-alive, nên mỗi lần tải là một handshake mới. Phản hồi được đọc trọn vào RAM. Simulator cũng hỗ trợ HTTPS qua cùng crate.
+
+## App YouTube
+
+App YouTube dùng YouTube Data API v3 chính thức: Home (feed từ các kênh đã đăng ký khi đăng nhập, video thịnh hành khi chưa đăng nhập), Search, Library (video đã thích, playlist, kênh đã đăng ký) và Account. Chưa phát được video trên board: nút Play hiện mã QR với link `https://youtu.be/<id>` để xem trên điện thoại.
+
+![feed](screenshots/youtube-feed.png) ![mã đăng nhập](screenshots/youtube-device-code.png)
+
+Không có khoá nào được ghi sẵn trong mã nguồn. Mỗi người tự tạo dự án Google Cloud của mình:
+
+1. Vào <https://console.cloud.google.com/>, tạo một project mới (ví dụ `p4os`).
+2. **APIs & Services → Library**, tìm **YouTube Data API v3** và bấm **Enable**.
+3. **APIs & Services → OAuth consent screen** (Google Auth Platform): chọn loại **External**, điền tên app và email. Ở mục **Audience → Test users**, thêm tài khoản Google bạn sẽ đăng nhập. Không cần thêm scope ở đây; app chỉ xin `youtube.readonly`.
+4. **Clients → Create client**, chọn loại **TVs and Limited Input devices**. Ghi lại **Client ID** và **Client secret**.
+5. (Tuỳ chọn, để xem thịnh hành và tìm kiếm khi chưa đăng nhập) **Credentials → Create credentials → API key**, nên giới hạn key chỉ dùng cho YouTube Data API v3.
+6. Trên console nối tiếp của board:
+
+```
+config set youtube.client_id 1234567890-abc.apps.googleusercontent.com
+config set youtube.client_secret GOCSPX-...
+config set youtube.api_key AIza...          # tuỳ chọn
+config set youtube.region VN                # tuỳ chọn, vùng của mục thịnh hành
+```
+
+7. Mở app YouTube, tab **Account → Sign in with Google**. Màn hình hiện một mã ngắn (chữ to) và mã QR của `google.com/device`; mở trang đó trên điện thoại, nhập mã và đồng ý. App tự hỏi Google theo chu kỳ (`interval`, chậm lại khi Google trả `slow_down`) cho tới khi đăng nhập xong.
+
+Ghi chú:
+
+- Sau khi đăng nhập, app lưu refresh token vào khoá `youtube.refresh_token` trong flash. Khoá này, `youtube.client_secret` và `youtube.api_key` được coi là bí mật: `config list` và `config set` chỉ hiện `[set]`, và không có token nào được in ra cổng serial. **Sign out** thu hồi quyền ở phía Google và xoá token khỏi flash.
+- App ở trạng thái **Testing** trên màn hình consent: refresh token hết hạn sau 7 ngày. Khi đó app báo cần đăng nhập lại và tự xoá token cũ. Muốn token dài hạn thì phải publish app.
+- Quota mặc định 10.000 đơn vị mỗi ngày, đặt lại lúc nửa đêm giờ Thái Bình Dương. Một lần tìm kiếm tốn 100 đơn vị; các lệnh khác (thịnh hành, chi tiết video, đã thích, playlist, đăng ký) tốn 1. Feed đăng ký được ghép từ 20 kênh (đăng ký, kênh, 1 playlist upload mỗi kênh, chi tiết video), khoảng 23 đơn vị mỗi lần làm mới, và được giữ 15 phút. Số đơn vị đã dùng trong ngày lưu ở `youtube.quota` và hiện ở tab Account; app từ chối lệnh vượt quota và dừng tới hôm sau khi Google báo `quotaExceeded`.
+- Ảnh thu nhỏ (`i.ytimg.com/vi/<id>/mqdefault.jpg`) chỉ được tải cho các dòng đang hiện trên màn hình, tối đa 2 lượt tải cùng lúc, giải mã mỗi khung hình một ảnh và không giải mã khi đang chạm màn hình; cache giữ tối đa 40 ảnh 160x90 (khoảng 1,1 MB, nằm trong PSRAM).
+- Ảnh chụp từ simulator (dữ liệu mẫu tự tạo, không dùng tài khoản thật): `cargo sim --script sim/fixtures/youtube/screens.sim`, ghi ra `docs/screenshots/youtube-*.png`.
