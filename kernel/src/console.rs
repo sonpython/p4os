@@ -1,11 +1,12 @@
 //! Kernel console over the on-chip USB-Serial-JTAG controller.
 
+use crate::sched::{self, notify_bits};
 use crate::spin::SpinLock;
-use crate::sync::{Mutex, Semaphore};
+use crate::sync::Mutex;
 use crate::{irq, mmio, soc};
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 
 const EP1: usize = soc::USB_SERIAL_JTAG;
 const EP1_CONF: usize = soc::USB_SERIAL_JTAG + 0x4;
@@ -52,10 +53,19 @@ fn on_rx() {
         }
     }
     mmio::write(INT_CLR, SERIAL_OUT_RECV_PKT);
-    RX_READY.release();
+    // Pairs with the fence in `read_byte_blocking`: either the reader sees
+    // the new bytes or this sees the reader.
+    fence(Ordering::SeqCst);
+    let reader = RX_READER.load(Ordering::Relaxed);
+    if reader != NO_THREAD {
+        sched::notify(reader, notify_bits::CONSOLE_RX);
+    }
 }
 
-static RX_READY: Semaphore = Semaphore::new(0);
+/// Thread blocked in `read_byte_blocking`. Only one thread (the shell)
+/// reads blocking; others poll `read_byte`.
+static RX_READER: AtomicUsize = AtomicUsize::new(NO_THREAD);
+const NO_THREAD: usize = usize::MAX;
 
 pub fn init_rx() {
     mmio::write(INT_CLR, SERIAL_OUT_RECV_PKT);
@@ -65,11 +75,15 @@ pub fn init_rx() {
 
 /// Block the calling thread until a byte arrives.
 pub fn read_byte_blocking() -> u8 {
+    RX_READER.store(sched::my_id(), Ordering::Relaxed);
+    fence(Ordering::SeqCst);
     loop {
         if let Some(b) = read_byte() {
             return b;
         }
-        RX_READY.acquire();
+        // A notification left over from bytes already consumed only costs
+        // one extra pass through this loop.
+        sched::wait_notify(notify_bits::CONSOLE_RX);
     }
 }
 
