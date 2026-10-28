@@ -1,8 +1,12 @@
-//! Opus decoding inside the audio thread: an [`AudioSource`] that pulls
-//! demuxed packets from a queue filled by the player and keeps the media
-//! clock (samples actually played) that video is synchronised to.
+//! Opus audio: a decoder worker thread turns demuxed packets into PCM, and
+//! a light [`AudioSource`] hands that PCM to the OS audio thread while
+//! counting the samples played, which is the media clock video follows.
+//!
+//! Decoding does not happen in the audio thread itself: opus-rs (`no_std`
+//! build) needs about 72 KB of stack to set up its CELT mode and ~50 KB per
+//! decode, far more than the OS audio thread has.
 
-use crate::spsc::Consumer;
+use crate::spsc::{Consumer, Producer};
 use crate::webm::Packet;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -10,25 +14,39 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use opus_rs::OpusDecoder;
-use p4os_sdk::AudioSource;
+use p4os_sdk::{AudioSource, Worker};
 
 pub const RATE: u32 = 48_000;
 /// Largest Opus packet: 120 ms at 48 kHz.
 const MAX_FRAME: usize = 5760;
+/// Stack for the decoder thread (see the module docs).
+pub const DECODER_STACK: usize = 128 * 1024;
+/// Decoded 20 ms chunks buffered ahead of the speaker (~2 s).
+pub const PCM_QUEUE: usize = 100;
+const IDLE_SLEEP_MS: u32 = 5;
 
-/// State shared between the audio thread and the player.
+/// State shared between the player, the decoder thread and the audio thread.
 #[derive(Default)]
 pub struct AudioClock {
     /// 48 kHz frames of real audio handed to the speaker since the source
     /// started (silence while starved does not count).
     pub played: AtomicU32,
-    /// Times the queue ran dry while more audio was expected.
+    /// Times the PCM queue ran dry while more audio was expected.
     pub underruns: AtomicU32,
     pub decode_errors: AtomicU32,
+    /// Microseconds spent decoding, and packets decoded.
+    pub decode_us: AtomicU32,
+    pub decoded: AtomicU32,
     /// Set by the player when every packet has been queued.
     pub input_done: AtomicBool,
+    /// Set by the decoder thread once it decoded the last packet.
+    pub decoded_all: AtomicBool,
     /// Set by the source once it has played the last sample.
     pub finished: AtomicBool,
+    /// Asks the decoder thread to exit.
+    pub stop: AtomicBool,
+    /// The decoder could not be created.
+    pub failed: AtomicBool,
     /// Sum of the absolute sample values decoded, a cheap fingerprint that
     /// shows audio is really decoded (no speaker is fitted).
     pub checksum: AtomicU32,
@@ -66,82 +84,114 @@ impl PacketDecoder {
     }
 }
 
-pub struct OpusSource {
-    packets: Consumer<Packet>,
+/// Decodes packets and drops what must not be heard: the OpusHead
+/// pre-skip at the start of the stream, and everything before `start_ms`
+/// after a seek (still decoded, so the decoder state settles).
+pub struct Trimmer {
     decoder: PacketDecoder,
-    pcm: Vec<i16>,
-    pos: usize,
-    /// Interleaved stereo samples still to discard (OpusHead pre-skip).
     skip: usize,
-    /// Packets before this time are decoded (to settle the decoder after a
-    /// seek) but not played.
     start_ms: i64,
+}
+
+impl Trimmer {
+    /// `pre_skip` applies only when playing from the start of the stream.
+    pub fn new(channels: u8, pre_skip: u16, start_ms: i64) -> Result<Self, &'static str> {
+        Ok(Self { decoder: PacketDecoder::new(channels)?, skip: if start_ms <= 0 { pre_skip as usize * 2 } else { 0 }, start_ms })
+    }
+
+    /// The audible PCM of one packet (may be empty).
+    pub fn decode(&mut self, pkt: &Packet) -> Result<Vec<i16>, &'static str> {
+        let mut pcm = Vec::new();
+        let n = self.decoder.decode(&pkt.data, &mut pcm)?;
+        if pkt.pts_ms + (n as i64 * 1000 / RATE as i64) <= self.start_ms {
+            return Ok(Vec::new());
+        }
+        let drop = self.skip.min(pcm.len());
+        self.skip -= drop;
+        pcm.drain(..drop);
+        Ok(pcm)
+    }
+}
+
+/// Decode a packet list on the calling thread (tests, host tools).
+pub fn decode_packets(packets: &[Packet], channels: u8, pre_skip: u16) -> Result<Vec<i16>, &'static str> {
+    let mut t = Trimmer::new(channels, pre_skip, 0)?;
+    let mut out = Vec::new();
+    for p in packets {
+        out.extend(t.decode(p)?);
+    }
+    Ok(out)
+}
+
+/// The decoder worker: packets in, PCM chunks out. The decoder is built
+/// inside the thread, whose stack is large enough for opus-rs.
+pub struct DecoderThread {
+    pub packets: Consumer<Packet>,
+    pub pcm: Producer<Vec<i16>>,
+    pub channels: u8,
+    pub pre_skip: u16,
+    pub start_ms: i64,
+    pub clock: Arc<AudioClock>,
+}
+
+impl DecoderThread {
+    pub fn run(mut self, w: &dyn Worker) {
+        let c = &*self.clock;
+        let Ok(mut trimmer) = Trimmer::new(self.channels, self.pre_skip, self.start_ms) else {
+            c.decode_errors.fetch_add(1, Ordering::Relaxed);
+            c.failed.store(true, Ordering::Release);
+            return;
+        };
+        let mut pending: Option<Vec<i16>> = None;
+        while !c.stop.load(Ordering::Acquire) {
+            if let Some(chunk) = pending.take() {
+                if let Err(chunk) = self.pcm.push(chunk) {
+                    pending = Some(chunk);
+                    w.sleep_ms(IDLE_SLEEP_MS);
+                }
+                continue;
+            }
+            let Some(pkt) = self.packets.pop() else {
+                if c.input_done.load(Ordering::Acquire) && self.packets.is_empty() {
+                    c.decoded_all.store(true, Ordering::Release);
+                }
+                w.sleep_ms(IDLE_SLEEP_MS);
+                continue;
+            };
+            let t = w.now_us();
+            match trimmer.decode(&pkt) {
+                Ok(pcm) if pcm.is_empty() => {}
+                Ok(pcm) => {
+                    let sum = pcm.iter().fold(0u32, |a, v| a.wrapping_add(v.unsigned_abs() as u32));
+                    c.checksum.fetch_add(sum, Ordering::Relaxed);
+                    pending = Some(pcm);
+                }
+                Err(_) => {
+                    c.decode_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            c.decode_us.fetch_add((w.now_us() - t) as u32, Ordering::Relaxed);
+            c.decoded.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The [`AudioSource`] given to the OS: copies decoded PCM, keeps the clock.
+pub struct PcmSource {
+    pcm: Consumer<Vec<i16>>,
+    cur: Vec<i16>,
+    pos: usize,
     clock: Arc<AudioClock>,
     starved: bool,
 }
 
-impl OpusSource {
-    /// `pre_skip` applies only when playing from the start of the stream.
-    pub fn new(packets: Consumer<Packet>, channels: u8, pre_skip: u16, start_ms: i64, clock: Arc<AudioClock>) -> Result<Self, &'static str> {
-        Ok(Self {
-            packets,
-            decoder: PacketDecoder::new(channels)?,
-            pcm: Vec::with_capacity(MAX_FRAME * 2),
-            pos: 0,
-            skip: if start_ms <= 0 { pre_skip as usize * 2 } else { 0 },
-            start_ms,
-            clock,
-            starved: false,
-        })
-    }
-
-    /// Decode the next packet into `pcm`. False when no packet is queued.
-    fn decode_next(&mut self) -> bool {
-        let Some(pkt) = self.packets.pop() else { return false };
-        self.pcm.clear();
-        self.pos = 0;
-        let n = match self.decoder.decode(&pkt.data, &mut self.pcm) {
-            Ok(n) => n,
-            Err(_) => {
-                self.clock.decode_errors.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
-        };
-        if pkt.pts_ms + (n as i64 * 1000 / RATE as i64) <= self.start_ms {
-            self.pcm.clear();
-            return true;
-        }
-        let sum = self.pcm.iter().fold(0u32, |a, v| a.wrapping_add(v.unsigned_abs() as u32));
-        self.clock.checksum.fetch_add(sum, Ordering::Relaxed);
-        let drop = self.skip.min(self.pcm.len());
-        self.pos = drop;
-        self.skip -= drop;
-        true
+impl PcmSource {
+    pub fn new(pcm: Consumer<Vec<i16>>, clock: Arc<AudioClock>) -> Self {
+        Self { pcm, cur: Vec::new(), pos: 0, clock, starved: false }
     }
 }
 
-/// Packets of the fixture or a stream, for host tools and tests: decode
-/// everything to interleaved stereo PCM, honouring the pre-skip.
-pub fn decode_packets(packets: &[Packet], channels: u8, pre_skip: u16) -> Result<Vec<i16>, &'static str> {
-    let (mut tx, rx) = crate::spsc::channel(packets.len().max(1));
-    for p in packets {
-        let _ = tx.push(p.clone());
-    }
-    let clock = Arc::new(AudioClock::default());
-    clock.input_done.store(true, Ordering::Release);
-    let mut src = OpusSource::new(rx, channels, pre_skip, 0, clock)?;
-    let mut out = Vec::new();
-    let mut buf = vec![0i16; 4096];
-    loop {
-        let n = src.fill(&mut buf);
-        out.extend_from_slice(&buf[..n]);
-        if n < buf.len() {
-            return Ok(out);
-        }
-    }
-}
-
-impl AudioSource for OpusSource {
+impl AudioSource for PcmSource {
     fn sample_rate(&self) -> u32 {
         RATE
     }
@@ -149,11 +199,13 @@ impl AudioSource for OpusSource {
     fn fill(&mut self, out: &mut [i16]) -> usize {
         let mut n = 0;
         while n + 1 < out.len() {
-            if self.pos >= self.pcm.len() {
-                if self.decode_next() {
+            if self.pos >= self.cur.len() {
+                if let Some(next) = self.pcm.pop() {
+                    self.cur = next;
+                    self.pos = 0;
                     continue;
                 }
-                if self.clock.input_done.load(Ordering::Acquire) {
+                if self.clock.decoded_all.load(Ordering::Acquire) && self.pcm.is_empty() {
                     self.clock.finished.store(true, Ordering::Release);
                     break;
                 }
@@ -167,8 +219,8 @@ impl AudioSource for OpusSource {
                 return out.len() & !1;
             }
             self.starved = false;
-            let take = (self.pcm.len() - self.pos).min((out.len() - n) & !1);
-            out[n..n + take].copy_from_slice(&self.pcm[self.pos..self.pos + take]);
+            let take = (self.cur.len() - self.pos).min((out.len() - n) & !1);
+            out[n..n + take].copy_from_slice(&self.cur[self.pos..self.pos + take]);
             self.pos += take;
             n += take;
             self.clock.played.fetch_add((take / 2) as u32, Ordering::Relaxed);
@@ -180,10 +232,11 @@ impl AudioSource for OpusSource {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::video::tests::TestWorker;
     use crate::webm;
 
-    /// `tests/fixtures/tone.webm`: 1 s of 440 Hz left / 660 Hz right at
-    /// half scale, Opus 64 kbps in WebM (see make-fixtures.sh).
+    /// `tests/fixtures/tone.webm`: 1 s of 440 Hz left / 660 Hz right,
+    /// Opus 64 kbps in WebM (see make-fixtures.sh).
     pub const TONE: &[u8] = include_bytes!("../tests/fixtures/tone.webm");
 
     fn tone_packets() -> (webm::AudioInit, Vec<Packet>) {
@@ -222,57 +275,54 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn keeps_the_clock_and_reports_underruns() {
+    fn skips_audio_before_the_seek_point() {
+        let (init, packets) = tone_packets();
+        let mut t = Trimmer::new(init.channels(), init.pre_skip(), 500).unwrap();
+        let total: usize = packets.iter().map(|p| t.decode(p).unwrap().len()).sum();
+        // Roughly the second half second remains.
+        let ms = total / 2 * 1000 / RATE as usize;
+        assert!((480..=540).contains(&ms), "{ms} ms");
+    }
+
+    fn fill_all(src: &mut PcmSource, clock: &AudioClock) -> usize {
+        let mut buf = vec![0i16; 1024];
+        let mut total = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !clock.finished.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            let before = clock.played.load(Ordering::Relaxed);
+            src.fill(&mut buf);
+            total += (clock.played.load(Ordering::Relaxed) - before) as usize;
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        total
+    }
+
+    #[test]
+    fn pipeline_keeps_the_clock_and_reports_underruns() {
         let (init, packets) = tone_packets();
         let (mut tx, rx) = crate::spsc::channel(64);
+        let (pcm_tx, pcm_rx) = crate::spsc::channel(PCM_QUEUE);
         let clock = Arc::new(AudioClock::default());
-        let mut src = OpusSource::new(rx, init.channels(), init.pre_skip(), 0, clock.clone()).unwrap();
+        let mut src = PcmSource::new(pcm_rx, clock.clone());
         let mut buf = vec![0i16; 1024];
-        // Nothing queued yet: silence, the clock stands still, one underrun.
+        // Nothing decoded yet: silence, the clock stands still, one underrun.
         assert_eq!(src.fill(&mut buf), 1024);
         assert_eq!(src.fill(&mut buf), 1024);
         assert_eq!(clock.played.load(Ordering::Relaxed), 0);
         assert_eq!(clock.underruns.load(Ordering::Relaxed), 1);
+        let thread = DecoderThread { packets: rx, pcm: pcm_tx, channels: init.channels(), pre_skip: init.pre_skip(), start_ms: 0, clock: clock.clone() };
+        let h = std::thread::spawn(move || thread.run(&TestWorker(std::time::Instant::now())));
         for p in packets.iter().take(10) {
             tx.push(p.clone()).unwrap();
         }
         clock.input_done.store(true, Ordering::Release);
-        let mut total = 0;
-        loop {
-            let n = src.fill(&mut buf);
-            total += n;
-            if n < buf.len() {
-                break;
-            }
-        }
+        let played = fill_all(&mut src, &clock);
+        clock.stop.store(true, Ordering::Release);
+        h.join().unwrap();
         // 10 packets of 20 ms minus the pre-skip.
-        assert_eq!(total / 2, 10 * 960 - init.pre_skip() as usize);
-        assert_eq!(clock.played.load(Ordering::Relaxed) as usize, total / 2);
+        assert_eq!(played, 10 * 960 - init.pre_skip() as usize);
         assert!(clock.finished.load(Ordering::Acquire));
         assert!(clock.checksum.load(Ordering::Relaxed) > 0);
-    }
-
-    #[test]
-    fn skips_audio_before_the_seek_point() {
-        let (init, packets) = tone_packets();
-        let (mut tx, rx) = crate::spsc::channel(64);
-        let clock = Arc::new(AudioClock::default());
-        let mut src = OpusSource::new(rx, init.channels(), init.pre_skip(), 500, clock.clone()).unwrap();
-        for p in &packets {
-            tx.push(p.clone()).unwrap();
-        }
-        clock.input_done.store(true, Ordering::Release);
-        let mut buf = vec![0i16; 1 << 16];
-        let mut total = 0;
-        loop {
-            let n = src.fill(&mut buf);
-            total += n;
-            if n < buf.len() {
-                break;
-            }
-        }
-        // Roughly the second half second remains.
-        let ms = total / 2 * 1000 / RATE as usize;
-        assert!((480..=540).contains(&ms), "{ms} ms");
+        assert_eq!(clock.decoded.load(Ordering::Relaxed), 10);
     }
 }

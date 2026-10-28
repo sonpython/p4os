@@ -4,7 +4,7 @@
 //! the audio thread and H.264 access units to the decoder thread, and picks
 //! the video frame to show from the audio clock.
 
-use crate::audio::{AudioClock, OpusSource, RATE};
+use crate::audio::{self, AudioClock, PcmSource, RATE};
 use crate::clients::{self, Client};
 use crate::error::{ErrorKind, PlayError};
 use crate::innertube::{self, Answer, Format, PlayerInfo, Storyboard};
@@ -253,10 +253,21 @@ impl Player {
     }
 
     fn fail(&mut self, e: PlayError, sys: &mut dyn System) {
-        if self.aout.is_some() {
+        if self.stop_audio() {
             sys.audio().stop();
         }
         self.phase = Phase::Failed(e);
+    }
+
+    /// Stop the audio decoder thread; true if one was running.
+    fn stop_audio(&mut self) -> bool {
+        match self.aout.take() {
+            Some(a) => {
+                a.clock.stop.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn presentation(&self) -> Option<Presentation> {
@@ -577,23 +588,23 @@ impl Player {
                 vo.recycle(f);
             }
         }
-        self.aout = None;
+        self.stop_audio();
         if let Some(a) = &mut self.audio {
             a.next = a.segment_at(t0);
             if let Some(f) = a.inflight.take() {
                 self.stale.push(f.id);
             }
             if let Demux::Audio(Some(init)) = &a.demux {
-                let (tx, rx) = spsc::channel(AUDIO_QUEUE);
+                let (tx, packets) = spsc::channel(AUDIO_QUEUE);
+                let (pcm, pcm_rx) = spsc::channel(audio::PCM_QUEUE);
                 let clock = Arc::new(AudioClock::default());
-                match OpusSource::new(rx, init.channels(), init.pre_skip(), t0 as i64, clock.clone()) {
-                    Ok(src) => {
-                        sys.audio().play(Box::new(src));
-                        sys.audio().pause(true);
-                        self.aout = Some(AudioOut { tx, pending: VecDeque::new(), clock, base_ms: t0, paused: true, finished: false });
-                    }
-                    Err(e) => return self.fail(PlayError::new(ErrorKind::Decode, e), sys),
+                let thread = audio::DecoderThread { packets, pcm, channels: init.channels(), pre_skip: init.pre_skip(), start_ms: t0 as i64, clock: clock.clone() };
+                if let Err(e) = sys.spawn_worker("ytaudio", None, audio::DECODER_STACK, Box::new(move |w| thread.run(w))) {
+                    return self.fail(PlayError::new(ErrorKind::System, format!("cannot start the audio decoder: {e}")), sys);
                 }
+                sys.audio().play(Box::new(PcmSource::new(pcm_rx, clock.clone())));
+                sys.audio().pause(true);
+                self.aout = Some(AudioOut { tx, pending: VecDeque::new(), clock, base_ms: t0, paused: true, finished: false });
             }
         }
         self.wall = None;
@@ -816,6 +827,11 @@ impl Player {
             return;
         }
         self.feed();
+        if let Some(a) = &self.aout
+            && a.clock.failed.load(Ordering::Acquire)
+        {
+            return self.fail(PlayError::new(ErrorKind::Decode, "the Opus decoder could not start"), sys);
+        }
         if let Some(v) = &self.vout
             && v.shared.failed.load(Ordering::Acquire)
         {
@@ -1022,8 +1038,9 @@ impl Player {
         if let Some(a) = &self.aout {
             let c = &a.clock;
             s.push_str(&format!(
-                " | audio queued {} ms underruns {} errors {} sum {:08x}",
+                " | audio queued {} ms opus avg {} us underruns {} errors {} sum {:08x}",
                 (a.tx.len() + a.pending.len()) as u64 * OPUS_PACKET_MS,
+                c.decode_us.load(Ordering::Relaxed) / c.decoded.load(Ordering::Relaxed).max(1),
                 c.underruns.load(Ordering::Relaxed),
                 c.decode_errors.load(Ordering::Relaxed),
                 c.checksum.load(Ordering::Relaxed)
@@ -1051,7 +1068,7 @@ impl Player {
 
     /// Stop playback and release the audio device and decoder thread.
     pub fn close(&mut self, sys: &mut dyn System) {
-        if self.aout.take().is_some() {
+        if self.stop_audio() {
             sys.audio().stop();
         }
         self.stop_decoder();

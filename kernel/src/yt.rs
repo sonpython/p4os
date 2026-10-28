@@ -79,7 +79,7 @@ fn run_bench(url: &str, kind: Bench) {
     let _ = crate::heap::take_peaks();
     let (sram0, psram0) = (crate::heap::usage().0, crate::heap::psram_usage().0);
     // The thread takes ownership of the job and signals when it is done.
-    sched::spawn_on(Some(1), "ytbench", 2, 64 * 1024, bench_thread, Box::into_raw(job) as usize);
+    sched::spawn_on(Some(1), "ytbench", 2, 160 * 1024, bench_thread, Box::into_raw(job) as usize);
     BENCH_DONE.acquire();
     let (sram_peak, psram_peak) = crate::heap::take_peaks();
     kprintln!(
