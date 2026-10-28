@@ -47,6 +47,11 @@ mock /youtube/v3/playlists? apps/src/youtube/fixtures/playlists.json
 mock oauth2.googleapis.com/device/code apps/src/youtube/fixtures/device-code.json
 mock oauth2.googleapis.com/token apps/src/youtube/fixtures/token-pending.json 428
 
+# 0. Nothing configured: the "no API key" message.
+launch youtube
+wait 200
+shot docs/screenshots/youtube-no-key.png
+
 # 1. Signed out with an API key: trending.
 config youtube.api_key fixture-api-key
 launch youtube

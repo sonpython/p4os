@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "gui", "sdk", "apps", "media", "net", "sim"]
+members = ["kernel", "gui", "sdk", "apps", "media", "mem", "net", "sim", "abi", "tlsf"]
+# User-mode apps build for the bare-metal target in their own workspace.
+exclude = ["userapps"]
 
 [profile.release]
 opt-level = 3

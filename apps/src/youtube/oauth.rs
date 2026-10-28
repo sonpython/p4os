@@ -265,6 +265,18 @@ impl Auth {
         }
     }
 
+    /// The app is closing: cancel every request still running and forget
+    /// a sign-in in progress (a stored session stays valid).
+    pub fn abandon(&mut self, net: &mut dyn Network) {
+        self.drop_inflight();
+        for id in self.orphans.drain(..) {
+            net.cancel(id);
+        }
+        if matches!(self.state, State::RequestingCode | State::WaitingForUser(_)) {
+            self.state = State::SignedOut;
+        }
+    }
+
     /// Advance the flow: collect answers and send whatever is due.
     pub fn tick(&mut self, net: &mut dyn Network, now_ms: u64) -> Option<Event> {
         self.orphans.retain(|id| matches!(net.poll(*id), FetchState::Pending));

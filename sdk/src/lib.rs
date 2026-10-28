@@ -179,6 +179,10 @@ pub trait Network {
     /// Current state of a fetch. Once `Done` or `Failed` has been
     /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
+    /// Abandon a request (the app is closing or no longer needs it): the
+    /// OS stops it and frees its result. Polling the id afterwards reports
+    /// an unknown request. The default does nothing.
+    fn cancel(&mut self, _id: FetchId) {}
 }
 
 #[derive(Clone, Debug)]
@@ -291,4 +295,13 @@ pub trait System {
     fn config_remove(&mut self, key: &str) {
         self.config_set(key, "");
     }
+    /// Fill `buf` from the OS random generator (salts, keys). Returns false
+    /// when no secure source exists; callers must then refuse the operation
+    /// rather than fall back to predictable data.
+    fn fill_random(&mut self, _buf: &mut [u8]) -> bool {
+        false
+    }
+    /// Lock the screen now if a passcode is configured. The desktop handles
+    /// this; the OS-level implementation does nothing.
+    fn lock_now(&mut self) {}
 }

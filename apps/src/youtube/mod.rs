@@ -71,6 +71,10 @@ const ROW_H: i32 = 108;
 const THUMB_W: i32 = 160;
 const THUMB_H: i32 = 90;
 const FOOTER_H: i32 = 72;
+/// Shown instead of trending when there is neither an API key nor a
+/// signed-in account.
+const NO_KEY_TITLE: &str = "No API key set";
+const NO_KEY_DETAIL: &str = "Trending and search without an account need a YouTube Data API key. On the serial console run: config set youtube.api_key <KEY>. Or sign in on the Account tab.";
 /// Save the quota count at least every this many units.
 const QUOTA_SAVE_STEP: u32 = 100;
 
@@ -960,9 +964,8 @@ impl YouTube {
         let (head, body) = r.split_top(HEADER_H);
         let signed_in = self.client.auth.is_signed_in();
         if !signed_in && !self.client.can_browse() {
-            header(ui, head, "YouTube", false, false);
-            let detail = "Sign in on the Account tab to see your subscriptions, or set youtube.api_key on the console to browse trending videos without an account.";
-            return message(ui, body, "Welcome", detail, Some("Account")).then_some(Action::Tab(Tab::Account));
+            header(ui, head, &format!("Trending in {}", self.region.to_ascii_uppercase()), false, false);
+            return message(ui, body, NO_KEY_TITLE, NO_KEY_DETAIL, Some("Account")).then_some(Action::Tab(Tab::Account));
         }
         let title = if signed_in { "Subscriptions".to_string() } else { format!("Trending in {}", self.region.to_ascii_uppercase()) };
         let (_, refresh) = header(ui, head, &title, false, true);
@@ -1350,7 +1353,7 @@ impl App for YouTube {
                 p.close(sys);
             }
         }
-        self.client.auth.cancel();
+        self.client.close(sys.net());
         self.thumbs.clear(sys);
         self.save_quota(sys, true);
     }
@@ -1534,6 +1537,34 @@ mod tests {
         assert_eq!(videos.list.items.len(), 2);
         assert!(!videos.list.loading);
         assert_eq!(videos.source, Source::Playlist("UUp4osChannelCCCCCCCCCCC".into()));
+    }
+
+    #[test]
+    fn without_a_key_nothing_is_requested() {
+        let mut sys = TestSys::default();
+        let mut app = YouTube::new();
+        frame(&mut app, &mut sys);
+        frame(&mut app, &mut sys);
+        assert!(sys.net.requests.is_empty());
+        assert!(!app.client.can_browse());
+        assert_eq!(app.tick_interval_ms(), None, "idle: no polling");
+    }
+
+    #[test]
+    fn closing_cancels_requests_in_flight() {
+        let mut sys = sys_with(&[(config::YOUTUBE_API_KEY, "AIza-test")]);
+        let mut app = YouTube::new();
+        frame(&mut app, &mut sys);
+        sys.net.respond_matching("chart=mostPopular", 200, TRENDING);
+        frame(&mut app, &mut sys);
+        frame(&mut app, &mut sys);
+        let video = app.trending.list.items[0].clone();
+        app.apply(Action::OpenVideo(video), &mut sys);
+        frame(&mut app, &mut sys);
+        assert!(sys.net.unpolled() > 0, "detail and thumbnails are loading");
+        app.on_close(&mut sys);
+        assert!(sys.net.cancelled >= 3);
+        assert_eq!(sys.net.unpolled(), 0, "nothing is left behind in the OS");
     }
 
     #[test]

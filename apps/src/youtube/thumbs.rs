@@ -132,10 +132,9 @@ impl Thumbs {
 
     /// Stop downloads and free memory (the app closes).
     pub fn clear(&mut self, sys: &mut dyn System) {
-        // Collect what can be collected; the OS frees the rest when done.
         for e in &self.entries {
             if let Slot::Fetching(id) = e.slot {
-                let _ = sys.net().poll(id);
+                sys.net().cancel(id);
             }
         }
         self.entries.clear();

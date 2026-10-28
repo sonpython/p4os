@@ -1,0 +1,14 @@
+[package]
+name = "crash"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "p4os user-mode isolation test: touches memory it does not own"
+
+[[bin]]
+name = "crash"
+test = false
+bench = false
+
+[dependencies]
+p4os-user = { path = "../p4os-user" }

@@ -1,0 +1,14 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "p4os user-mode demo: console output and timing through syscalls"
+
+[[bin]]
+name = "hello"
+test = false
+bench = false
+
+[dependencies]
+p4os-user = { path = "../p4os-user" }

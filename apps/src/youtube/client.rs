@@ -54,6 +54,16 @@ impl<T> Client<T> {
         self.queue.push_back(Req { call, tag, retried: false, bearer: false });
     }
 
+    /// The app is closing: drop queued calls and cancel running ones,
+    /// including token requests.
+    pub fn close(&mut self, net: &mut dyn Network) {
+        self.queue.clear();
+        for (id, _) in self.inflight.drain(..) {
+            net.cancel(id);
+        }
+        self.auth.abandon(net);
+    }
+
     /// Calls queued or running.
     pub fn busy(&self) -> bool {
         !self.queue.is_empty() || !self.inflight.is_empty()

@@ -52,7 +52,7 @@ pub enum State {
 }
 
 pub struct Thread {
-    _stack: alloc::boxed::Box<[u32]>,
+    _stack: crate::heap::Stack,
     pub name: &'static str,
     pub priority: u8,
     pub state: State,
@@ -112,7 +112,7 @@ pub fn spawn_on(
 ) -> usize {
     assert!(affinity.is_none_or(|a| a < HART_COUNT), "no such core");
     let stack_size = stack_size & !15;
-    let mut stack_mem = alloc::vec![STACK_FILL; stack_size / 4].into_boxed_slice();
+    let mut stack_mem = crate::heap::Stack::new(stack_size, STACK_FILL);
     stack_mem[0] = STACK_CANARY;
     let stack = stack_mem.as_mut_ptr();
     let top = stack as usize + stack_size;
@@ -176,6 +176,17 @@ fn reap_exited(s: &mut Scheduler, dead: &mut alloc::vec::Vec<Thread>) {
 extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
     let entry: fn(usize) = unsafe { core::mem::transmute(entry) };
     entry(arg);
+    thread_exit()
+}
+
+/// Id of the thread running on the calling core, if the scheduler has
+/// started there.
+pub fn current_id() -> Option<usize> {
+    SCHED.lock().current[irq::hart_id()]
+}
+
+/// End the calling thread (as if its entry function had returned).
+pub fn exit_current() -> ! {
     thread_exit()
 }
 

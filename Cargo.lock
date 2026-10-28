@@ -624,13 +624,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "p4os-abi"
+version = "0.1.0"
+
+[[package]]
 name = "p4os-apps"
 version = "0.1.0"
 dependencies = [
  "libm",
  "p4os-media",
  "p4os-sdk",
+ "pbkdf2",
  "qrcodegen-no-heap",
+ "sha2",
+ "subtle",
 ]
 
 [[package]]
@@ -647,10 +654,13 @@ dependencies = [
  "fatfs",
  "getrandom",
  "libm",
+ "p4os-abi",
  "p4os-apps",
  "p4os-media",
+ "p4os-mem",
  "p4os-net",
  "p4os-sdk",
+ "p4os-tlsf",
  "sha2",
  "smoltcp",
 ]
@@ -663,6 +673,10 @@ dependencies = [
  "p4os-sdk",
  "zune-jpeg",
 ]
+
+[[package]]
+name = "p4os-mem"
+version = "0.1.0"
 
 [[package]]
 name = "p4os-net"
@@ -692,10 +706,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "p4os-tlsf"
+version = "0.1.0"
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "pem-rfc7468"

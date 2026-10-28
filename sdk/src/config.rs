@@ -39,15 +39,37 @@ pub const YOUTUBE_REGION: &str = "youtube.region";
 /// YouTube app: quota units spent, "YYYY-MM-DD:units" (Pacific day).
 pub const YOUTUBE_QUOTA: &str = "youtube.quota";
 
+/// Lock screen switch, "1" or "0". The lock is only active when a passcode
+/// is stored as well.
+pub const LOCK_ENABLED: &str = "lock.enabled";
+/// Salted passcode hash `v1$<iterations>$<salt hex>$<hash hex>`, never the
+/// passcode itself. Empty or absent: no passcode.
+pub const LOCK_PIN: &str = "lock.pin";
+/// Wrong passcode attempts since the last successful unlock.
+pub const LOCK_FAILS: &str = "lock.fails";
+/// Pending lockout: its end in Unix seconds, or "?" when the wall clock was
+/// unknown. Empty or absent: no lockout.
+pub const LOCK_UNTIL: &str = "lock.until";
+/// Auto-lock: "screen-off" (default), "1m", "5m" or "never".
+pub const LOCK_AUTO: &str = "lock.auto";
+
 /// Keys whose values are write-only for apps and never printed.
 pub fn is_secret(key: &str) -> bool {
     key == WIFI_PASSWORD
 }
 
-/// Keys whose values are never printed (shell listings, logs). Apps may
-/// still read them, unlike [`is_secret`] keys.
-pub fn is_hidden(key: &str) -> bool {
-    is_secret(key) || matches!(key, YOUTUBE_CLIENT_SECRET | YOUTUBE_API_KEY | YOUTUBE_REFRESH_TOKEN)
+/// Keys printed as `[set]` in listings and never echoed: the secrets, every
+/// `lock.*` key (passcode hash and lockout state) and the YouTube
+/// credentials. Apps may still read the non-[`is_secret`] ones: the desktop
+/// verifies against the passcode hash, the YouTube app uses its tokens.
+pub fn is_masked(key: &str) -> bool {
+    is_secret(key) || is_protected(key) || matches!(key, YOUTUBE_CLIENT_SECRET | YOUTUBE_API_KEY | YOUTUBE_REFRESH_TOKEN)
+}
+
+/// Keys the shell's `config set`/`config unset` refuse: the lock state may
+/// only change through Settings or `lock reset`.
+pub fn is_protected(key: &str) -> bool {
+    key.starts_with("lock.")
 }
 
 pub type Entries = BTreeMap<String, String>;
@@ -318,12 +340,16 @@ mod tests {
     }
 
     #[test]
-    fn credentials_are_hidden() {
-        for k in [WIFI_PASSWORD, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN] {
-            assert!(is_hidden(k), "{k}");
+    fn masked_keys() {
+        for k in [WIFI_PASSWORD, LOCK_PIN, LOCK_FAILS, LOCK_ENABLED, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN] {
+            assert!(is_masked(k), "{k}");
         }
-        assert!(!is_hidden(YOUTUBE_CLIENT_ID));
+        assert!(!is_masked(WIFI_SSID));
+        assert!(!is_masked(YOUTUBE_CLIENT_ID));
+        assert!(!is_secret(LOCK_PIN), "the desktop must be able to read the hash");
         assert!(!is_secret(YOUTUBE_REFRESH_TOKEN), "the app must be able to read its token");
+        assert!(is_protected(LOCK_PIN) && is_protected(LOCK_AUTO));
+        assert!(!is_protected(YOUTUBE_API_KEY) && !is_protected("locker"));
         for k in [YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN, YOUTUBE_REGION, YOUTUBE_QUOTA] {
             assert!(check_entry(k, "v").is_ok(), "{k}");
         }

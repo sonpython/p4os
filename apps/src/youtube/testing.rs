@@ -13,6 +13,7 @@ pub struct MockNet {
     pub requests: Vec<HttpRequest>,
     /// Requests not yet collected by a final `poll`.
     states: BTreeMap<FetchId, FetchState>,
+    pub cancelled: usize,
 }
 
 impl MockNet {
@@ -91,6 +92,11 @@ impl Network for MockNet {
         let id = self.last_id();
         self.states.insert(id, FetchState::Pending);
         id
+    }
+
+    fn cancel(&mut self, id: FetchId) {
+        self.states.remove(&id);
+        self.cancelled += 1;
     }
 
     fn poll(&mut self, id: FetchId) -> FetchState {

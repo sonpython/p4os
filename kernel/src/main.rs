@@ -2,8 +2,11 @@
 #![no_main]
 
 extern crate alloc;
+// Linked only for the C memory symbols it exports; nothing calls it by name.
+extern crate p4os_mem;
 
 mod app_desc;
+mod apploader;
 mod audio;
 mod backlight;
 mod bench;
@@ -24,6 +27,7 @@ mod irq;
 mod mmio;
 mod net;
 mod proto;
+mod pmp;
 mod psram;
 mod regi2c;
 mod rng;
@@ -35,10 +39,12 @@ mod smp;
 mod soc;
 mod spin;
 mod sync;
+mod syscall;
 mod systimer;
 mod time;
 mod touch;
 mod trap;
+mod usermode;
 mod wdt;
 mod wifi;
 mod wifi_auto;
@@ -90,6 +96,8 @@ extern "C" fn kmain() -> ! {
         Ok(size) => unsafe { heap::add_region(psram::BASE, size) },
         Err(e) => kprintln!("psram: init failed: {:?}", e),
     }
+    // Before core 1 starts: maps the flash slots holding user apps.
+    apploader::init();
     irq::init();
     smp::init_ipi();
     time::init();

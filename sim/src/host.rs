@@ -113,6 +113,10 @@ impl System for HostSystem {
         self.config.insert(key.into(), value.into());
     }
 
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
+    }
+
     fn config_remove(&mut self, key: &str) {
         self.config.remove(key);
     }
@@ -366,6 +370,11 @@ impl Network for HostNet {
 
     fn poll(&mut self, id: FetchId) -> FetchState {
         self.fetches.get(&id).map_or(FetchState::Failed("unknown request".into()), |s| s.lock().unwrap().clone())
+    }
+
+    fn cancel(&mut self, id: FetchId) {
+        // The worker thread finishes on its own; its result is discarded.
+        self.fetches.remove(&id);
     }
 }
 

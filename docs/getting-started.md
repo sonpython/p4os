@@ -17,6 +17,7 @@ p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x*
 | Reset board và xem console | `python3 scripts/monitor.py [giây]` |
 | Giữ quyền dùng board riêng khi nhiều tiến trình chạy song song | `scripts/board-lock.sh <lệnh>` |
 | Reset, gửi lệnh shell rồi in phản hồi | `python3 scripts/shell-session.py ps mem demo` |
+| Chạy test trên máy host (gồm test của allocator TLSF) | `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-tlsf --target aarch64-unknown-linux-gnu` |
 
 Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`).
 
@@ -53,7 +54,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu và khoá bí mật chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại), `config unset KEY` (xoá một khoá), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -64,12 +65,43 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | `0x0..0x10000` | bootloader (`0x2000`), bảng phân vùng (`0x8000`) |
 | `0x10000..` | phân vùng `factory`: kernel, chạy thẳng từ flash qua cache |
 | `0x710000..0x720000` | 64 KiB đầu của phân vùng `storage`: cài đặt của kernel (`kernel/src/config.rs`) |
-| `0x720000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
+| `0x720000..0x800000` | 14 slot app user, mỗi slot 64 KiB (`scripts/flash-app.sh`); kernel chỉ đọc |
+| `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
 
 - Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
-- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), và các khoá `youtube.*` của app YouTube (xem mục bên dưới). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá), và các khoá `youtube.*` của app YouTube (xem mục App YouTube). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
 - Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
 - Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
+
+## Màn hình khoá
+
+| Màn hình khoá | Nhập sai | Bị khoá tạm | Ngang |
+|---|---|---|---|
+| ![](screenshots/lock-portrait.png) | ![](screenshots/lock-wrong.png) | ![](screenshots/lock-lockout.png) | ![](screenshots/lock-landscape.png) |
+
+- Bật trong Settings > Security: công tắc **Lock screen**, nút **Set passcode** (hoặc **Change** / **Remove** khi đã có mã), và **Auto-lock**: `Screen off` (mặc định), `1 min`, `5 min`, `Never`. Mã là 4–8 chữ số, nhập hai lần để xác nhận. Bật công tắc khi chưa có mã thì sẽ chuyển sang bước đặt mã; đổi mã, xoá mã hay tắt khoá đều phải nhập mã hiện tại.
+- Màn hình khoá chỉ hoạt động khi đã bật **và** đã có mã. Nó hiện lúc khởi động, khi chạm biểu tượng ổ khoá trên thanh trạng thái (hoặc lệnh `lock now`), và tự khoá theo Auto-lock. Chừng nào phần quản lý nguồn chưa báo sự kiện tắt màn hình, chế độ `Screen off` tạm dùng mốc 1 phút không chạm. `1 min` / `5 min` tính từ lần chạm cuối.
+- Khi khoá, không phần nào của app hay thanh trạng thái được vẽ và không app nào nhận chạm; app vẫn chạy nền (ví dụ nhạc vẫn phát). Lần chạm đánh thức màn hình không được tính là phím.
+- Mã không bao giờ được lưu dạng rõ: `lock.pin` chứa `v1$<số vòng>$<salt>$<hash>`, là PBKDF2-HMAC-SHA256 với salt ngẫu nhiên 16 byte lấy từ bộ sinh số ngẫu nhiên của chip, 10 000 vòng; so sánh hash theo thời gian hằng. Mã và hash không bao giờ được in ra serial. Trên board (360 MHz, SHA-256 bằng phần mềm) một lần kiểm tra mất khoảng 305 ms (`lock bench`); màn hình khoá hiện "Checking..." trong lúc đó.
+- Giới hạn thử: sau 5 lần sai bị khoá 30 giây, mỗi 5 lần sai tiếp theo thời gian gấp đôi (60 s, 120 s, …), tối đa 15 phút. Số lần sai (`lock.fails`) và lần khoá đang chờ (`lock.until`) được lưu trong flash nên khởi động lại không xoá được: nếu đồng hồ đã đặt, thời điểm hết khoá được giữ nguyên; nếu chưa, lần khoá bắt đầu lại từ đầu sau khi khởi động. Nhập sai mã hiện tại trong Settings cũng bị tính và có thể khoá màn hình.
+- **Quên mã**: trên console serial gõ `lock reset`, rồi `lock reset CLEAR-PASSCODE`. Lệnh xoá mã, tắt khoá và xoá bộ đếm. Lệnh này bị từ chối khi chạy từ app Terminal. Giới hạn cần nói rõ: console serial (cổng USB) được coi là giao diện tin cậy, nên ai cầm được board và cắm cáp đều mở được khoá. Ngoài ra flash không mã hoá, nên người có quyền truy cập vật lý có thể đọc hash và dò mã ngoại tuyến (mã 4–8 chữ số có ít khả năng). Màn hình khoá chống người lạ dùng màn hình cảm ứng, không chống người có cáp và thời gian.
+
+## App user (U-mode, cách ly bằng PMP)
+
+App user là binary riêng, không link vào kernel. Kernel nạp app từ flash vào một vùng RAM riêng rồi chạy nó ở U-mode. App chỉ đọc/ghi được vùng nhớ của chính nó và gọi kernel qua `ecall` (syscall).
+
+| Việc | Lệnh |
+|---|---|
+| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app` |
+| Ghi image vào slot N (0..13, địa chỉ 0x720000 + N×0x10000). Script tự giữ khoá board | `scripts/flash-app.sh 0 out/userapps/hello.p4app` |
+| Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
+| Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |
+
+- Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 7) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6, 8, 9) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
+- App luôn chạy trên core 1. Bootloader ESP-IDF khoá PMP entry 0–2 của core 0 (CLIC, cache controller, ROM vẫn chạm được từ U-mode), còn core 1 không bị khoá entry nào. Lệnh `pmp` in trạng thái PMP của từng core.
+- Giới hạn phần cứng: trên core 1, truy cập U-mode vào vùng CPU subsystem (0x20000000.., gồm CLIC) bị chặn nhưng **không sinh exception**, core 1 treo đến khi reset. **Đừng chạy `run 1 7`** khi người khác đang dùng board.
+- ABI syscall, định dạng image và cơ chế PMP: [plans/261028-1217-user-mode-apps/design.md](../plans/261028-1217-user-mode-apps/design.md).
+- Khi build trong git worktree, cargo gộp cả `.cargo/config.toml` của repo cha nên `-Tlink.x` bị lặp. Khi đó hãy build kernel với `RUSTFLAGS="-C link-arg=-Tlink.x"`.
 
 ## Khôi phục firmware gốc
 
@@ -95,6 +127,14 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - `mcycle` là bộ đếm riêng của từng core (core 1 bắt đầu đếm muộn hơn khoảng 1 giây), nên `bench` ghim mọi thread của nó vào core 0.
 - `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
 - `smpdemo` đo được 1 thread 1116 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 2 lần. `config stress 50` chạy song song với tải trên cả hai core: 100 lần lưu đều đúng và không treo.
+
+## Heap
+
+- Mỗi vùng nhớ (SRAM, PSRAM) có một allocator TLSF riêng (crate `tlsf/`, gọi từ `kernel/src/heap.rs`), mỗi vùng một spinlock. Alloc và free chạy trong thời gian hằng, nên thời gian giữ lock (có che ngắt) ngắn và có cận trên, dù heap phân mảnh đến đâu. Khối nhỏ hơn 64 KiB vào SRAM trước, khối lớn vào PSRAM trước, vùng kia dùng làm dự phòng khi hết chỗ.
+- Mỗi khối có header 8 byte và được làm tròn lên bội số 16 byte. Vì thế vùng SRAM 256 KiB không còn chứa vừa đúng hai khối 128 KiB (`bench` copy SRAM dùng 2 × 127 KiB).
+- **Không được dùng heap trong trình xử lý ngắt.** Mọi lối vào heap đều kiểm tra stack pointer; nếu đang ở stack ngắt thì panic với thông báo `heap used from interrupt context`. Trong ngữ cảnh ngắt, console in thẳng ra USB thay vì ghi vào bộ đệm capture, nên Ctrl-T và thông báo lỗi không cấp phát.
+- Stack của thread cỡ 2/4/8/16/24/32/48 KiB lấy từ pool riêng của từng cỡ. Khi thread thoát, stack của nó được giữ lại trong pool cho thread sau cùng cỡ, thay vì trả về heap, nên spawn/thoát thread liên tục không làm SRAM bị thủng lỗ chỗ. `mem` in số stack đang nằm chờ trong pool. Phần bộ nhớ này vẫn được tính là đã dùng.
+- Đo bằng `bench` (thời gian một lần alloc, ngắt bị che trong lúc đo, heap có N lỗ trống xen giữa các khối còn sống). Với N = 16/256/1024, thời gian tối đa là 1,08/1,12/1,15 µs. Allocator first-fit cũ cần 0,82/4,2/12,8 µs cho alloc và tới 23,7 µs cho free. Trên heap sạch, một cặp alloc+free 32 B mất 1,26 µs (first-fit cũ: 0,60 µs). Đây là cái giá để đổi lấy cận trên.
 
 ## Màn hình: những điều đã kiểm chứng
 
@@ -149,7 +189,7 @@ config set youtube.region VN                # tuỳ chọn, vùng của mục th
 
 Ghi chú:
 
-- Sau khi đăng nhập, app lưu refresh token vào khoá `youtube.refresh_token` trong flash. Khoá này, `youtube.client_secret` và `youtube.api_key` được coi là bí mật: `config list` chỉ hiện `[set]`, và không có token nào được in ra cổng serial. **Sign out** thu hồi quyền ở phía Google và xoá token khỏi flash.
+- Sau khi đăng nhập, app lưu refresh token vào khoá `youtube.refresh_token` trong flash. Khoá này, `youtube.client_secret` và `youtube.api_key` được coi là bí mật: `config list` và `config set` chỉ hiện `[set]`, và không có token nào được in ra cổng serial. **Sign out** thu hồi quyền ở phía Google và xoá token khỏi flash.
 - App ở trạng thái **Testing** trên màn hình consent: refresh token hết hạn sau 7 ngày. Khi đó app báo cần đăng nhập lại và tự xoá token cũ. Muốn token dài hạn thì phải publish app.
 - Quota mặc định 10.000 đơn vị mỗi ngày, đặt lại lúc nửa đêm giờ Thái Bình Dương. Một lần tìm kiếm tốn 100 đơn vị; các lệnh khác (thịnh hành, chi tiết video, đã thích, playlist, đăng ký) tốn 1. Feed đăng ký được ghép từ 20 kênh (đăng ký, kênh, 1 playlist upload mỗi kênh, chi tiết video), khoảng 23 đơn vị mỗi lần làm mới, và được giữ 15 phút. Số đơn vị đã dùng trong ngày lưu ở `youtube.quota` và hiện ở tab Account; app từ chối lệnh vượt quota và dừng tới hôm sau khi Google báo `quotaExceeded`.
 - Ảnh thu nhỏ (`i.ytimg.com/vi/<id>/mqdefault.jpg`) chỉ được tải cho các dòng đang hiện trên màn hình, tối đa 2 lượt tải cùng lúc, giải mã mỗi khung hình một ảnh và không giải mã khi đang chạm màn hình; cache giữ tối đa 40 ảnh 160x90 (khoảng 1,1 MB, nằm trong PSRAM).

@@ -5,7 +5,8 @@
 //! Script commands (one per argument or line):
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
-//!   config KEY VALUE | mock URL_PART FILE [STATUS]
+//!   config KEY VALUE (store a setting) | lock (lock the screen now)
+//!   mock URL_PART FILE [STATUS]
 //!
 //! `mock` answers every request whose URL contains URL_PART with FILE
 //! (relative paths start at the workspace root) instead of the network;
@@ -149,9 +150,13 @@ impl Sim {
                 self.frame();
             }
             Some("shot") => self.shot(parts[1]),
-            Some("config") => {
-                let value = parts.get(2..).map(|v| v.join(" ")).unwrap_or_default();
-                self.sys.config_set(parts[1], &value);
+            Some("config") if parts.len() >= 3 => {
+                self.sys.config_set(parts[1], &parts[2..].join(" "));
+                self.frame();
+            }
+            Some("lock") => {
+                self.desktop.lock_now(&mut self.sys);
+                self.frame();
             }
             Some("mock") => {
                 let file = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).join(parts[2]);

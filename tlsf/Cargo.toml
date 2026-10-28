@@ -1,0 +1,8 @@
+[package]
+name = "p4os-tlsf"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Two-level segregated fit allocator: O(1) alloc and free over raw memory regions"
+
+[dependencies]

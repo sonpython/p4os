@@ -851,6 +851,13 @@ impl App for Browser {
             self.loading.as_ref().map(|_| 50)
         }
     }
+
+    fn on_close(&mut self, sys: &mut dyn System) {
+        // Free the page being loaded instead of leaving it in the OS.
+        if let Some((id, _)) = self.loading.take() {
+            sys.net().cancel(id);
+        }
+    }
 }
 
 #[cfg(test)]

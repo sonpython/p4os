@@ -127,6 +127,13 @@ pub fn send(url: &str, request: http::Request) -> FetchId {
     id
 }
 
+/// Abandon a request: a queued one is never sent, a running one has its
+/// connection closed, and no result is kept for it.
+pub fn cancel(id: FetchId) {
+    RESULTS.lock().remove(&id);
+    REQUESTS.lock().retain(|(r, _, _)| *r != id);
+}
+
 /// State of a fetch. A finished result is handed out once and then
 /// released, so response bodies do not accumulate in memory.
 pub fn poll_fetch(id: FetchId) -> FetchState {
@@ -266,13 +273,26 @@ fn run(mac_lo: usize) {
                 }
             }
         }
+        // Drop cancelled jobs (their result slot is gone) and close their sockets.
+        jobs.retain(|job| {
+            let live = RESULTS.lock().contains_key(&job.id);
+            if !live {
+                if let Some(h) = job.stage.socket() {
+                    net.sockets.remove(h);
+                }
+            }
+            live
+        });
         jobs.retain_mut(|job| net.advance(job));
         sched::sleep_ms(if jobs.is_empty() { 10 } else { 2 });
     }
 }
 
+/// Store the outcome of a request, unless it was cancelled meanwhile.
 fn finish(id: FetchId, state: FetchState) {
-    RESULTS.lock().insert(id, state);
+    if let Some(slot) = RESULTS.lock().get_mut(&id) {
+        *slot = state;
+    }
 }
 
 /// What one step of a job produced.
@@ -592,5 +612,9 @@ impl p4os_sdk::Network for WifiNet {
 
     fn poll(&mut self, id: FetchId) -> FetchState {
         poll_fetch(id)
+    }
+
+    fn cancel(&mut self, id: FetchId) {
+        cancel(id)
     }
 }

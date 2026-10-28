@@ -1,0 +1,17 @@
+# Isolated user-mode apps for p4os. Built for the bare-metal target as
+# position-independent executables and packed into app images by
+# scripts/build-userapps.sh.
+[workspace]
+resolver = "2"
+members = ["p4os-user", "hello", "crash"]
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = false
+panic = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"

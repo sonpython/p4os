@@ -10,3 +10,7 @@ p4os-sdk = { path = "../sdk" }
 p4os-media = { path = "../media" }
 libm = "0.2"
 qrcodegen-no-heap = "1.8"
+# Lock screen passcode hashing (PBKDF2-HMAC-SHA256) and constant-time compare.
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2 = { version = "0.10", default-features = false }
+subtle = { version = "2.6", default-features = false }

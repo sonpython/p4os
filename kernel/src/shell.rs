@@ -18,7 +18,7 @@ pub fn run(_: usize) {
         match byte {
             b'\r' | b'\n' => {
                 kprintln!();
-                execute(core::str::from_utf8(&line[..len]).unwrap_or(""));
+                execute(core::str::from_utf8(&line[..len]).unwrap_or(""), true);
                 len = 0;
                 kprint!("p4os> ");
             }
@@ -39,27 +39,33 @@ pub fn run(_: usize) {
     }
 }
 
-/// True once `typed` is `config set KEY ` for a key whose value is hidden.
+/// True once `typed` is `config set KEY ` for a key whose value is masked.
 fn typing_hidden_value(typed: &[u8]) -> bool {
     let Some(rest) = typed.strip_prefix(b"config set ") else { return false };
     let Some(space) = rest.iter().position(|&b| b == b' ') else { return false };
-    core::str::from_utf8(&rest[..space]).is_ok_and(p4os_sdk::config::is_hidden)
+    core::str::from_utf8(&rest[..space]).is_ok_and(p4os_sdk::config::is_masked)
 }
 
-/// Run a command and return its output instead of printing it.
+/// Run a command and return its output instead of printing it. Used by
+/// the Terminal app, so commands reserved for the serial console are refused.
 pub fn capture(cmd: &str) -> alloc::string::String {
     console::capture_start();
-    execute(cmd);
+    execute(cmd, false);
     console::capture_end()
 }
 
-fn execute(cmd: &str) {
+/// `serial`: typed on the physical serial console (trusted), as opposed to
+/// coming from an app.
+fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi get smpdemo"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp"
         ),
         "flash" => crate::flash::diagnose(),
+        "apps" => crate::apploader::list(),
+        "pmp" => pmp_survey(),
+        c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
         "config" | "config list" => config_list(),
         c if c.starts_with("config set ") => config_set(c["config set ".len()..].trim()),
         c if c.starts_with("config unset ") => config_unset(c["config unset ".len()..].trim()),
@@ -67,6 +73,11 @@ fn execute(cmd: &str) {
             Ok(n) => config_stress(n),
             Err(_) => kprintln!("usage: config stress N"),
         },
+        "lock" => lock_status(),
+        "lock now" => crate::gui::request_lock(),
+        "lock bench" => lock_bench(),
+        "lock reset" => kprintln!("this removes the lock screen passcode; type: lock reset {}", LOCK_RESET_WORD),
+        c if c.strip_prefix("lock reset ") == Some(LOCK_RESET_WORD) => lock_reset(serial),
         "wifi" => wifi_status(),
         "wifi forget" => wifi_forget(),
         c if c.starts_with("wifi save ") => wifi_join(c["wifi save ".len()..].trim(), true),
@@ -114,6 +125,8 @@ fn execute(cmd: &str) {
             let (pused, ptotal) = heap::psram_usage();
             kprintln!("sram: {} / {} bytes used, largest free block {}", used, total, heap::largest_free());
             kprintln!("psram: {} / {} bytes used", pused, ptotal);
+            let (stacks, stack_bytes) = heap::stack_pool_idle();
+            kprintln!("stack pool: {} idle stacks, {} bytes (counted as used)", stacks, stack_bytes);
             let (speak, ppeak) = heap::take_peaks();
             kprintln!("peak since last mem: sram {} psram {}", speak, ppeak);
         }
@@ -123,6 +136,40 @@ fn execute(cmd: &str) {
         "clock" => kprintln!("{}, cpu ~{} MHz", clock::dividers(), crate::measure_cpu_mhz()),
         "irq" => kprintln!("tick {} Hz, worst alarm latency {:.2} us", time::TICK_HZ, time::max_latency_us()),
         other => kprintln!("unknown command: {}", other),
+    }
+}
+
+/// `pmp`: per core, how well PMP can confine user apps (probes each core
+/// once and logs its locked entries).
+fn pmp_survey() {
+    for (hart, verdict) in crate::pmp::survey().iter().enumerate() {
+        kprintln!("core {}: {:?}", hart, verdict);
+    }
+    match crate::pmp::app_hart() {
+        Ok(h) => kprintln!("user apps run on core {}", h),
+        Err(e) => kprintln!("user apps unavailable: {}", e),
+    }
+}
+
+/// `run SLOT [ARG]`: start the user app in a flash slot and wait for it to
+/// end. The kernel logs how it ended (exit code or the fault that killed it).
+fn run_app(args: &str) {
+    let mut it = args.split_whitespace().map(str::parse::<u32>);
+    let (slot, arg) = match (it.next(), it.next(), it.next()) {
+        (Some(Ok(slot)), None, None) => (slot, 0),
+        (Some(Ok(slot)), Some(Ok(arg)), None) => (slot, arg),
+        _ => {
+            kprintln!("usage: run SLOT [ARG]");
+            return;
+        }
+    };
+    match crate::apploader::run(slot as usize, arg) {
+        Ok((_, status)) => {
+            while status.outcome().is_none() {
+                sched::sleep_ms(10);
+            }
+        }
+        Err(e) => kprintln!("run: slot {}: {}", slot, e),
     }
 }
 
@@ -468,37 +515,104 @@ fn config_list() {
         kprintln!("config: empty");
     }
     for (k, v) in entries {
-        let shown = if p4os_sdk::config::is_hidden(&k) { "[set]" } else { v.as_str() };
+        let shown = if p4os_sdk::config::is_masked(&k) { "[set]" } else { v.as_str() };
         kprintln!("{} = {}", k, shown);
     }
 }
 
-/// `config set KEY VALUE`: store a setting. Values of hidden keys
-/// (credentials) are never echoed back.
+/// `config set KEY VALUE`: store a setting. Masked values (credentials)
+/// are never echoed back; `lock.*` keys are refused so the passcode only
+/// changes through Settings or `lock reset`.
 fn config_set(args: &str) {
     let Some((key, value)) = args.split_once(' ') else {
         kprintln!("usage: config set KEY VALUE");
         return;
     };
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
     let value = value.trim();
     if let Err(e) = p4os_sdk::config::check_entry(key, value) {
         kprintln!("config: {} rejected: {:?}", key, e);
         return;
     }
     match crate::config::set(key, value) {
-        Ok(()) if p4os_sdk::config::is_hidden(key) => kprintln!("{} = [set]", key),
+        Ok(()) if p4os_sdk::config::is_masked(key) => kprintln!("{} = [set]", key),
         Ok(()) => kprintln!("{} = {}", key, value),
         Err(e) => kprintln!("config: saving {} failed: {:?}", key, e),
     }
 }
 
 fn config_unset(key: &str) {
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
     match crate::config::update(|e| {
         e.remove(key);
     }) {
         Ok(()) => kprintln!("{} removed", key),
         Err(e) => kprintln!("config: removing {} failed: {:?}", key, e),
     }
+}
+
+const LOCK_RESET_WORD: &str = "CLEAR-PASSCODE";
+
+/// Lock screen state, without the passcode hash.
+fn lock_status() {
+    use p4os_sdk::config::{LOCK_AUTO, LOCK_ENABLED, LOCK_FAILS, LOCK_PIN, LOCK_UNTIL};
+    let get = |k| crate::config::get(k).filter(|v| !v.is_empty());
+    kprintln!(
+        "lock: {}, passcode {}, auto-lock {}, failed attempts {}, lockout {}",
+        if get(LOCK_ENABLED).as_deref() == Some("1") { "on" } else { "off" },
+        if get(LOCK_PIN).is_some() { "set" } else { "not set" },
+        get(LOCK_AUTO).as_deref().unwrap_or("screen-off"),
+        get(LOCK_FAILS).as_deref().unwrap_or("0"),
+        if get(LOCK_UNTIL).is_some() { "pending" } else { "none" },
+    );
+}
+
+/// Forget the passcode and the attempt counter. Only from the serial
+/// console: physical access to it is the recovery path by design.
+fn lock_reset(serial: bool) {
+    use p4os_sdk::config::{LOCK_ENABLED, LOCK_FAILS, LOCK_PIN, LOCK_UNTIL};
+    if !serial {
+        kprintln!("lock reset is only accepted on the serial console");
+        return;
+    }
+    match crate::config::update(|e| {
+        for k in [LOCK_PIN, LOCK_ENABLED, LOCK_FAILS, LOCK_UNTIL] {
+            e.remove(k);
+        }
+    }) {
+        Ok(()) => kprintln!("lock: passcode cleared, lock screen off"),
+        Err(e) => kprintln!("config: saving failed: {:?}", e),
+    }
+}
+
+/// Time one passcode check at the configured PBKDF2 cost (dummy digits).
+fn lock_bench() {
+    use p4os_apps::lock::pin::{ITERATIONS, PinEntry, PinHash, SALT_LEN};
+    let mut digits = PinEntry::default();
+    for d in *b"000000" {
+        digits.push(d);
+    }
+    let mut salt = [0u8; SALT_LEN];
+    crate::rng::fill(&mut salt);
+    let start = crate::systimer::now_ticks();
+    let hash = PinHash::new(&digits, salt, ITERATIONS);
+    let derive_us = (crate::systimer::now_ticks() - start) / crate::systimer::TICKS_PER_US;
+    let start = crate::systimer::now_ticks();
+    let ok = hash.verify(&digits);
+    let verify_us = (crate::systimer::now_ticks() - start) / crate::systimer::TICKS_PER_US;
+    kprintln!(
+        "lock bench: PBKDF2-HMAC-SHA256 x{}: hash {} ms, verify {} ms ({})",
+        ITERATIONS,
+        derive_us / 1000,
+        verify_us / 1000,
+        if ok { "ok" } else { "MISMATCH" }
+    );
 }
 
 fn wifi_status() {

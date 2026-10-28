@@ -16,7 +16,11 @@ smoltcp = { version = "0.12", default-features = false, features = ["alloc", "me
 p4os-sdk = { path = "../sdk" }
 p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
+p4os-abi = { path = "../abi" }
 p4os-net = { path = "../net" }
+# Strong memcpy/memmove/memset/memcmp/bcmp overriding compiler_builtins' weak ones.
+p4os-mem = { path = "../mem" }
+p4os-tlsf = { path = "../tlsf" }
 # rustls-rustcrypto draws randomness through getrandom 0.2; the kernel
 # registers its hardware RNG as the custom backend (src/rng.rs).
 getrandom = { version = "0.2", features = ["custom"] }

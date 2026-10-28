@@ -3,6 +3,7 @@
 //! for every input event or requested tick and presents the canvas.
 
 use crate::APPS;
+use crate::lock::{self, Lock};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -25,6 +26,7 @@ pub struct Desktop {
     keyboard: Keyboard,
     keyboard_open: bool,
     running: Option<(usize, Box<dyn App>)>,
+    lock: Lock,
 }
 
 impl Default for Desktop {
@@ -42,7 +44,29 @@ impl Desktop {
             keyboard: Keyboard::default(),
             keyboard_open: false,
             running: None,
+            lock: Lock::default(),
         }
+    }
+
+    /// True while the lock screen is up: nothing else is drawn and no input
+    /// reaches apps or system gestures.
+    pub fn is_locked(&self) -> bool {
+        self.lock.is_locked()
+    }
+
+    /// Lock immediately (if a passcode is configured).
+    pub fn lock_now(&mut self, sys: &mut dyn System) {
+        self.lock.lock_now(sys);
+    }
+
+    /// The display turned off (power management).
+    pub fn on_screen_off(&mut self, sys: &mut dyn System) {
+        self.lock.on_screen_off(sys);
+    }
+
+    /// The display woke up again (power management).
+    pub fn on_wake(&mut self, sys: &mut dyn System) {
+        self.lock.on_wake(sys);
     }
 
     pub fn running_app(&self) -> Option<&'static str> {
@@ -70,7 +94,17 @@ impl Desktop {
     pub fn frame(&mut self, canvas: &mut Canvas, input: &Input, sys: &mut dyn System) -> Option<u32> {
         let screen = canvas.bounds();
         let (status, body) = screen.split_top(STATUS_H);
-        let mut proxy = SysProxy { inner: sys, launch: None };
+        let mut proxy = SysProxy { inner: sys, launch: None, lock: false };
+
+        // The lock screen covers everything and takes all input. The touch
+        // that found the screen locked only wakes it.
+        let just_locked = self.lock.check(input, proxy.inner);
+        if self.lock.is_locked() {
+            let quiet = Input { pos: input.pos, down: input.down, press_pos: input.press_pos, ..Default::default() };
+            let input = if just_locked { &quiet } else { input };
+            return self.lock.frame(canvas, input, &self.fonts, &self.theme, proxy.inner);
+        }
+
         let keyboard_was_open = self.keyboard_open;
 
         let next = if self.running.is_some() {
@@ -81,6 +115,10 @@ impl Desktop {
         };
         self.status_bar(canvas, input, status, &mut proxy);
 
+        if proxy.lock {
+            self.lock.lock_now(proxy.inner);
+            return Some(0);
+        }
         if let Some(id) = proxy.launch.take() {
             self.launch(&id, proxy.inner);
             return Some(0);
@@ -116,6 +154,7 @@ impl Desktop {
             format!("CPU {:.0}%  RAM {}M", stats.cpu_load * 100.0, used / 1024)
         };
         let orientation = sys.orientation();
+        let lockable = lock::is_configured(sys);
         let mut ui = self.ui(canvas, input);
         ui.fill(r, Color::hex(0x080a0f));
         let f = ui.fonts.small;
@@ -127,11 +166,22 @@ impl Desktop {
             let phone = Rect::new(b.x + (b.w - w) / 2, b.y + (b.h - h) / 2, w, h);
             c.stroke_round_rect(phone, 3, 2, col);
         });
-        ui.text(Rect::new(r.x + 52, r.y, 120, r.h), "p4os", &f, dim, Align::Left);
+        // Lock button, shown only when there is a lock to engage.
+        let mut lock_tapped = false;
+        let mut label_x = r.x + 52;
+        if lockable {
+            let lr = Rect::new(r.x + 52, r.y, 40, r.h);
+            lock_tapped = ui.icon_button(lr, |c, b, col| lock::padlock(c, b.center(), 16, col));
+            label_x = lr.right() + 6;
+        }
+        ui.text(Rect::new(label_x, r.y, 120, r.h), "p4os", &f, dim, Align::Left);
         ui.text(r, &clock, &f, text, Align::Center);
         ui.text(Rect::new(r.x, r.y, r.w - 14, r.h), &right, &f, dim, Align::Right);
         if rotate {
             sys.set_orientation(orientation.toggled());
+        }
+        if lock_tapped {
+            sys.lock_now();
         }
     }
 
@@ -236,6 +286,8 @@ impl Desktop {
 struct SysProxy<'a> {
     inner: &'a mut dyn System,
     launch: Option<String>,
+    /// An app or the status bar asked to lock the screen.
+    lock: bool,
 }
 
 impl System for SysProxy<'_> {
@@ -292,5 +344,11 @@ impl System for SysProxy<'_> {
     }
     fn config_remove(&mut self, key: &str) {
         self.inner.config_remove(key)
+    }
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        self.inner.fill_random(buf)
+    }
+    fn lock_now(&mut self) {
+        self.lock = true;
     }
 }
