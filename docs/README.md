@@ -34,6 +34,7 @@ Not yet: second CPU core, user-mode/PMP-isolated apps loaded from SD, BLE, PPA g
 | `sdk/` | The app interface: `App`, `System`, files, audio, network |
 | `apps/` | Desktop shell and built-in apps |
 | `media/` | JPEG/BMP and MP3/WAV decoding |
+| `mem/` | `memcpy`/`memmove`/`memset`/`memcmp` for the kernel, replacing the slower `compiler_builtins` versions; host-tested |
 | `net/` | Transport-independent HTTP/1.0, SNTP and TLS client logic shared by the kernel and the simulator |
 | `sim/` | Host simulator: runs the desktop on Linux and writes PNG screenshots |
 | `scripts/` | Build, flash, serial console, JTAG register dumps, camera-based test tools |

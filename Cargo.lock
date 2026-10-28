@@ -648,6 +648,7 @@ dependencies = [
  "libm",
  "p4os-apps",
  "p4os-media",
+ "p4os-mem",
  "p4os-net",
  "p4os-sdk",
  "sha2",
@@ -662,6 +663,10 @@ dependencies = [
  "p4os-sdk",
  "zune-jpeg",
 ]
+
+[[package]]
+name = "p4os-mem"
+version = "0.1.0"
 
 [[package]]
 name = "p4os-net"
