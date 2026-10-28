@@ -1,0 +1,8 @@
+[package]
+name = "p4os-mem"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Word-wise memcpy/memmove/memset/memcmp for the p4os kernel (riscv32), host-testable"
+
+[dependencies]

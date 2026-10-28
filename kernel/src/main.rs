@@ -2,6 +2,8 @@
 #![no_main]
 
 extern crate alloc;
+// Linked only for the C memory symbols it exports; nothing calls it by name.
+extern crate p4os_mem;
 
 mod app_desc;
 mod audio;
