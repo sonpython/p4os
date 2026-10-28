@@ -19,11 +19,11 @@ Status: working on real hardware, under active development. Built as a learning 
 | Input | GT911 touch over I2C (axis calibration still to verify), USB console keys |
 | Storage | SDMMC with IDMAC, FAT32 with long file names (rust-fatfs) |
 | Audio | I2S + ES8311 codec + DMA ring (verified electrically; no speaker fitted) |
-| Network | ESP32-C6 over SDIO running ESP-Hosted v2: Wi-Fi STA, DHCP, DNS, TCP and HTTP/1.0 via smoltcp |
+| Network | ESP32-C6 over SDIO running ESP-Hosted v2: Wi-Fi STA, DHCP, DNS, SNTP, TCP and HTTP/1.0 via smoltcp; HTTPS with TLS 1.3/1.2 (rustls + RustCrypto, certificates verified against the Mozilla roots) |
 | GUI | Immediate-mode toolkit with anti-aliased fonts (Vietnamese included), on-screen keyboard, portrait/landscape |
 | Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor, Settings, Clock, Paint, 2048 |
 
-Not yet: second CPU core, user-mode/PMP-isolated apps loaded from SD, TLS (HTTPS), BLE, PPA graphics acceleration.
+Not yet: second CPU core, user-mode/PMP-isolated apps loaded from SD, BLE, PPA graphics acceleration.
 
 ## Layout
 
@@ -34,6 +34,7 @@ Not yet: second CPU core, user-mode/PMP-isolated apps loaded from SD, TLS (HTTPS
 | `sdk/` | The app interface: `App`, `System`, files, audio, network |
 | `apps/` | Desktop shell and built-in apps |
 | `media/` | JPEG/BMP and MP3/WAV decoding |
+| `net/` | Transport-independent HTTP/1.0, SNTP and TLS client logic shared by the kernel and the simulator |
 | `sim/` | Host simulator: runs the desktop on Linux and writes PNG screenshots |
 | `scripts/` | Build, flash, serial console, JTAG register dumps, camera-based test tools |
 | `docs/` | Setup and hardware notes (Vietnamese): [getting-started.md](getting-started.md) |
