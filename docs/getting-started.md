@@ -86,6 +86,26 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 - Giới hạn thử: sau 5 lần sai bị khoá 30 giây, mỗi 5 lần sai tiếp theo thời gian gấp đôi (60 s, 120 s, …), tối đa 15 phút. Số lần sai (`lock.fails`) và lần khoá đang chờ (`lock.until`) được lưu trong flash nên khởi động lại không xoá được: nếu đồng hồ đã đặt, thời điểm hết khoá được giữ nguyên; nếu chưa, lần khoá bắt đầu lại từ đầu sau khi khởi động. Nhập sai mã hiện tại trong Settings cũng bị tính và có thể khoá màn hình.
 - **Quên mã**: trên console serial gõ `lock reset`, rồi `lock reset CLEAR-PASSCODE`. Lệnh xoá mã, tắt khoá và xoá bộ đếm. Lệnh này bị từ chối khi chạy từ app Terminal. Giới hạn cần nói rõ: console serial (cổng USB) được coi là giao diện tin cậy, nên ai cầm được board và cắm cáp đều mở được khoá. Ngoài ra flash không mã hoá, nên người có quyền truy cập vật lý có thể đọc hash và dò mã ngoại tuyến (mã 4–8 chữ số có ít khả năng). Màn hình khoá chống người lạ dùng màn hình cảm ứng, không chống người có cáp và thời gian.
 
+## Điều hướng bằng cử chỉ và app chạy nền
+
+| Thanh home | Vuốt lên | Chọn app | Quay lại | Quản lý app |
+|---|---|---|---|---|
+| ![](screenshots/nav-home-indicator.png) | ![](screenshots/nav-home-swipe.png) | ![](screenshots/nav-switcher.png) | ![](screenshots/nav-back-gesture.png) | ![](screenshots/nav-task-manager.png) |
+
+| Trang 1 (ngang) | Đang vuốt trang | Trang 2 |
+|---|---|---|
+| ![](screenshots/nav-home-page-1.png) | ![](screenshots/nav-home-page-swipe.png) | ![](screenshots/nav-home-page-2.png) |
+
+- **Vuốt nhanh lên từ mép dưới** (dải có thanh home, cao 24 px): về màn hình chính. App không bị đóng mà chuyển sang chạy nền.
+- **Vuốt lên rồi giữ** khoảng 300 ms trước khi nhấc tay: mở trình chọn app. Mỗi app là một thẻ có tên và ảnh thu nhỏ khung hình cuối. Chạm thẻ để chuyển sang app đó, vuốt thẻ lên để đóng app, **Close all** đóng tất cả. Chạm ra ngoài thẻ hoặc vuốt Back để quay lại app trước đó.
+- **Vuốt từ mép trái sang phải**: Back (Browser lùi trang, Files lên thư mục trước, Settings về danh sách, Notes lưu và đóng ghi chú, Photos về lưới ảnh). Nếu app không còn gì để lùi thì về màn hình chính. **Vuốt từ mép phải sang trái**: Forward (Browser, Files). Phím Esc trên console USB cũng là Back.
+- Cử chỉ chỉ bắt đầu khi ngón tay đặt trong vùng 24 px sát mép, nên cuộn trong app không bị ảnh hưởng. Chạm (không kéo) trong vùng mép vẫn đến app như bình thường. Hai ngón tay huỷ cử chỉ. Khi màn hình đang khoá, mọi cử chỉ đều tắt.
+- **Màn hình chính có nhiều trang**: lưới icon cỡ thường, 3×4 khi dọc và 5×2 khi ngang. Vuốt ngang để đổi trang: trang đi theo ngón tay, khi thả thì chuyển trang nếu vuốt nhanh hoặc đã quá nửa, không thì trượt về. Dấu chấm phía trên thanh home cho biết trang hiện tại. Trên màn hình chính, Back (vuốt từ mép trái) về trang trước, Forward về trang sau. Trang đang xem được giữ khi mở rồi đóng app (khởi động lại thì về trang 1). Nhóm app khác (ví dụ Examples) có trang riêng với tiêu đề.
+- **Trạng thái app**: Foreground (đang hiện), Background (chạy nền vì đang làm việc đã khai báo: Music đang phát nhạc, Browser đang tải trang), Suspended (giữ nguyên trạng thái, không dùng CPU), Stopped. App chạy nền không vẽ gì và chỉ được tối đa 10% một core; vượt quá 5 giây liên tiếp thì bị chuyển sang Suspended.
+- **Bảo vệ hệ thống**: tối đa 6 app cùng chạy; mở app thứ 7 thì app lâu không dùng nhất bị đóng (có thông báo). Mỗi app có ngân sách heap 160 KiB SRAM và 8 MiB PSRAM. App nền vượt ngân sách được yêu cầu giải phóng bộ nhớ, sau 2 giây vẫn vượt thì bị đóng; app đang hiện chỉ bị đóng khi vượt gấp đôi. Khi còn dưới 48 KiB SRAM hoặc 2 MiB PSRAM trống, các app nền được yêu cầu giải phóng trước, rồi từng app nền lâu không dùng nhất bị đóng (không bao giờ đóng app đang hiện). App nào làm treo màn hình quá 1 giây 3 lần trong 1 phút sẽ hiện hộp thoại **Close app / Wait**.
+- **Monitor > Apps**: danh sách app đang chạy với trạng thái, % CPU, SRAM, PSRAM và nút **Close**. Số heap của từng app được tính theo app đang chạy lúc cấp phát, nên chỉ gần đúng khi bộ nhớ được chuyển giữa các thread.
+- Thử trên board qua shell: `swipe X1 Y1 X2 Y2 MS [hold]` (ví dụ `swipe 240 795 240 560 150` về màn hình chính, thêm `hold` để mở trình chọn app), `tap X Y`, `top`. Trên simulator: `swipe ...`, `down X Y`, `move X Y [MS]`, `up`. Ảnh ở trên được tạo bằng `cargo sim -- --script docs/screenshots/nav-shots.txt`.
+
 ## App user (U-mode, cách ly bằng PMP)
 
 App user là binary riêng, không link vào kernel. Kernel nạp app từ flash vào một vùng RAM riêng rồi chạy nó ở U-mode. App chỉ đọc/ghi được vùng nhớ của chính nó và gọi kernel qua `ecall` (syscall).
@@ -96,6 +116,10 @@ App user là binary riêng, không link vào kernel. Kernel nạp app từ flash
 | Ghi image vào slot N (0..13, địa chỉ 0x720000 + N×0x10000). Script tự giữ khoá board | `scripts/flash-app.sh 0 out/userapps/hello.p4app` |
 | Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
 | Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |
+| Chạy app mà không chờ; dừng app theo số thread | shell: `start 0`, `kill 7` |
+| Xem các app đang chạy (app có sẵn và app user) kèm CPU, SRAM, PSRAM | shell: `top` |
+
+- Giới hạn cho app user (kernel áp dụng, `kernel/src/appctl.rs`): tối đa 4 app cùng lúc; RAM mỗi app (image + dữ liệu + stack) tối đa 192 KiB, tổng 512 KiB, kiểm tra lúc nạp; mỗi app được dùng 25% một core trong mỗi cửa sổ 1 giây. Dùng hết thì scheduler giữ app lại đến hết cửa sổ (`appmon: 'crash' ... throttled`); app bị giữ 10 cửa sổ liên tiếp thì bị dừng (`*** app 'crash' (thread N) killed by the app supervisor`). Thử bằng `start SLOT 10` với `crash.p4app` (tham số 10 là vòng lặp vô hạn).
 
 - Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 7) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6, 8, 9) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
 - App luôn chạy trên core 1. Bootloader ESP-IDF khoá PMP entry 0–2 của core 0 (CLIC, cache controller, ROM vẫn chạm được từ U-mode), còn core 1 không bị khoá entry nào. Lệnh `pmp` in trạng thái PMP của từng core.
