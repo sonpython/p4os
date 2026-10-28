@@ -251,7 +251,8 @@ Cách dùng:
 | Việc | Cách làm |
 |---|---|
 | Mở từ launcher | App **YT Player**: nhập id hoặc link (`youtube.com/watch?v=...`, `youtu.be/...`, `/shorts/...`) |
-| Mở từ app khác (ví dụ app duyệt YouTube) | `p4os_ytplay::app::play(sys, "dQw4w9WgXcQ")`. Desktop sẽ chuyển sang màn hình player. |
+| Mở từ app YouTube | Nút **Play** ở trang chi tiết video phát ngay trên board (`apps/src/youtube/player.rs`) |
+| Mở từ app khác | `p4os_ytplay::app::play(sys, "dQw4w9WgXcQ")`. Desktop sẽ chuyển sang màn hình player. |
 | Từ console | `yt play ID [144\|240\|audio]`, `yt pause`, `yt seek -10`, `yt seek 60`, `yt stop`, `yt stat` (fps, khung bỏ, thời gian giải mã, bộ đệm, CPU, RAM) |
 | Đo decoder trên core 1 | `yt bench URL [số khung]` (file H.264 Annex-B), `yt bench-opus URL` (file WebM Opus) |
 | Simulator | `cargo sim "yt play dQw4w9WgXcQ; wait 10000; yt stat; shot /tmp/yt.png"` |
@@ -282,10 +283,11 @@ Giới hạn:
 - 144p là mặc định. Đo bằng `yt bench` trên board (một core, 360 MHz, luồng YouTube thật): 144p giải mã 14,3 ms/khung (khoảng 70 khung/giây, ~36 nghìn chu kỳ mỗi macroblock), đổi sang RGB565 mất thêm 4,5 ms/khung. 240p mất 45,8 ms/khung (khoảng 21 khung/giây), thấp hơn 25–30 khung/giây của luồng, nên 240p sẽ bỏ khung. 360p trở lên không chạy được. Kết quả giải mã trên board trùng từng bit với bản giải mã trên Pi (CRC của 300 khung).
 - Opus mất khoảng 2,7 ms cho mỗi gói 20 ms (khoảng 14% một core) khi chạy một mình.
 - Mỗi khung GUI vẽ lại cả màn hình. Lần chạy đầu trên board, một khung GUI mất khoảng 45 ms để vẽ và 30 ms để đổi buffer, nên video thật chỉ đạt vài khung/giây. SRAM cũng bị hết, vì mỗi gói đã tách được cấp phát riêng. Bản hiện tại giữ dữ liệu đã tách và PCM trong PSRAM, và chỉ vẽ lại khi tới lúc hiện khung kế tiếp. Các sửa đổi này **chưa được đo lại trên board**, vì board mất kết nối USB.
-- Chưa có loa, nên tiếng chỉ kiểm chứng bằng bộ đếm (số mẫu đã phát, `sum` trong `yt stat`) và checksum PCM so với bản giải mã trên Pi.
+- Đã kiểm chứng tiếng bằng loa: khi phát `5-EBS0tyJyc`, micro của camera đo được mức RMS khoảng 3700, so với khoảng 100 lúc im lặng và 22 lúc tạm dừng.
+- Khi màn hình khoá hoặc tắt, tiếng vẫn phát tiếp như trên điện thoại. Desktop gọi `App::background` của app đang chạy. Hình thì không giải mã tiếp, và sẽ bắt kịp ở keyframe kế tiếp khi mở lại màn hình. Khi đang phát video, màn hình không tự tối hay tắt (`App::keep_awake`).
 - Khi không có luồng hình (chọn Audio, hoặc video không có H.264), player hiện ảnh storyboard 160×90 của YouTube, mỗi 2–5 giây một ảnh. Nếu cũng không có storyboard, nó hiện hình động thay thế.
-- Không hỗ trợ livestream, HLS, video cần đăng nhập, và video "made for kids" (client VISIONOS không phát được loại này). Luồng HLS của YouTube chỉ có tiếng AAC, mà chưa có decoder AAC `no_std`, nên HLS không được dùng làm phương án dự phòng.
-- Đóng player khi đang tải dở: kết quả của lần tải đó được dọn ở lần mở player kế tiếp.
+- Không hỗ trợ livestream, HLS, video cần đăng nhập, và video "made for kids" (client VISIONOS không phát được loại này). Luồng HLS của YouTube chỉ có tiếng AAC, mà chưa có decoder AAC `no_std`, nên không dùng HLS.
+- Request dùng `Network::send` (method, header, body tối đa 2 KiB). Request được phép tự đặt `User-Agent`, vì InnerTube cần đúng UA của client. Đóng player sẽ huỷ các lần tải đang dở bằng `Network::cancel`.
 
 ## App YouTube
 
