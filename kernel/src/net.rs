@@ -284,7 +284,13 @@ fn run(mac_lo: usize) {
             live
         });
         jobs.retain_mut(|job| net.advance(job));
-        sched::sleep_ms(if jobs.is_empty() { 10 } else { 2 });
+        if jobs.is_empty() {
+            sched::sleep_ms(crate::power::net_idle_poll_ms());
+        } else {
+            // TLS handshakes and transfers want the full clock.
+            crate::power::boost(200);
+            sched::sleep_ms(2);
+        }
     }
 }
 

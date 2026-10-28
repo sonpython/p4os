@@ -60,9 +60,10 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash power config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp"
         ),
         "flash" => crate::flash::diagnose(),
+        c if c == "power" || c.starts_with("power ") => crate::power::command(&c["power".len()..]),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
         c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
@@ -114,7 +115,11 @@ fn execute(cmd: &str, serial: bool) {
             }
         }
         c if c.starts_with("bl ") => match c[3..].trim().parse::<u32>() {
-            Ok(pct) => crate::backlight::set(pct as f32 / 100.0),
+            Ok(pct) => {
+                // A lit, awake panel first; the GUI sets its own level on wake.
+                crate::power::wake_screen_blocking(1000);
+                crate::backlight::set(pct as f32 / 100.0)
+            }
             Err(_) => kprintln!("usage: bl 0..100"),
         },
         "vpg on" => crate::display::test_pattern(true),

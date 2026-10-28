@@ -252,7 +252,7 @@ pub fn is_online(hart: usize) -> bool {
 
 fn idle(_: usize) {
     loop {
-        unsafe { asm!("wfi") };
+        crate::power::idle();
     }
 }
 
@@ -536,11 +536,15 @@ fn ids(mut mask: u32) -> impl Iterator<Item = usize> {
     })
 }
 
-/// Called from the tick interrupt on core 0: wake sleepers, account time on
-/// every core, and end time slices that another thread is waiting for.
-pub fn on_tick(now: u32) {
-    let mut guard = SCHED.lock();
-    let s = &mut *guard;
+/// Called from the tick interrupt on core 0 with the current tick and the
+/// ticks since the previous call (more than one after tickless idle or
+/// masked interrupts): wake sleepers, account time on every core, and end
+/// time slices that another thread is waiting for.
+pub fn on_tick(now: u32, elapsed: u32) {
+    advance(&mut SCHED.lock(), now, elapsed);
+}
+
+fn advance(s: &mut Scheduler, now: u32, elapsed: u32) {
     for i in ids(s.sleeping) {
         if let State::Sleeping { until } = s.threads[i].as_ref().unwrap().state {
             if (now.wrapping_sub(until) as i32) >= 0 {
@@ -548,20 +552,28 @@ pub fn on_tick(now: u32) {
             }
         }
     }
-    let end_of_second = now % 1000 == 0;
+    let end_of_second = now / 1000 != now.wrapping_sub(elapsed) / 1000;
     for hart in 0..HART_COUNT {
+        let Some(t) = s.current[hart].and_then(|i| s.threads[i].as_mut()) else {
+            if end_of_second {
+                IDLE_TICKS[hart].store(0, Ordering::Relaxed);
+                LOAD_PERMILLE[hart].store(0, Ordering::Relaxed);
+            }
+            continue;
+        };
+        t.run_ticks += elapsed;
+        if t.priority == PRIORITY_IDLE {
+            IDLE_TICKS[hart].fetch_add(elapsed, Ordering::Relaxed);
+        }
         if end_of_second {
             let idle = IDLE_TICKS[hart].swap(0, Ordering::Relaxed);
             let load = if is_online(hart) { 1000u32.saturating_sub(idle) } else { 0 };
             LOAD_PERMILLE[hart].store(load, Ordering::Relaxed);
         }
-        let Some(t) = s.current[hart].and_then(|i| s.threads[i].as_mut()) else { continue };
-        t.run_ticks += 1;
         if t.priority == PRIORITY_IDLE {
-            IDLE_TICKS[hart].fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        t.slice_used += 1;
+        t.slice_used += elapsed;
         let priority = t.priority;
         if t.slice_used >= TIME_SLICE_TICKS && has_contender(s, hart, priority) {
             resched(hart);
@@ -575,6 +587,11 @@ pub fn on_tick(now: u32) {
 pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
     let mut guard = SCHED.lock();
     let s = &mut *guard;
+    // Any reschedule ends tickless idle: account for the ticks that passed
+    // (waking sleepers now due) before picking.
+    if let Some((now, elapsed)) = time::resume() {
+        advance(s, now, elapsed);
+    }
     let hart = irq::hart_id();
     let prev = s.current[hart];
     if let Some(cur) = prev {
@@ -670,6 +687,34 @@ fn restore_fp(t: &Thread) {
             p = in(reg) p, t = out(reg) _,
         );
     }
+}
+
+/// Tickless idle hook: if every online core runs its idle thread and no
+/// other thread is ready, call `f` under the scheduler lock with the tick
+/// the earliest sleeper is due (`None` if nothing sleeps). Holding the lock
+/// keeps any core from starting a thread until `f` returns.
+pub fn when_all_idle<R>(f: impl FnOnce(Option<u32>) -> R) -> Option<R> {
+    let s = SCHED.lock();
+    let all_idle = (0..HART_COUNT).all(|hart| {
+        !is_online(hart)
+            || s.current[hart].and_then(|i| s.threads[i].as_ref()).is_some_and(|t| t.priority == PRIORITY_IDLE)
+    });
+    if !all_idle || NEED_RESCHED.iter().any(|f| f.load(Ordering::Relaxed)) {
+        return None;
+    }
+    if ids(s.ready).any(|i| s.threads[i].as_ref().is_some_and(|t| t.priority != PRIORITY_IDLE)) {
+        return None;
+    }
+    let now = time::ticks();
+    let mut wake: Option<u32> = None;
+    for i in ids(s.sleeping) {
+        if let Some(State::Sleeping { until }) = s.threads[i].as_ref().map(|t| t.state)
+            && wake.is_none_or(|w| (until.wrapping_sub(now) as i32) < (w.wrapping_sub(now) as i32))
+        {
+            wake = Some(until);
+        }
+    }
+    Some(f(wake))
 }
 
 #[derive(Clone, Copy)]
