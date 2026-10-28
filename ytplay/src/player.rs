@@ -890,8 +890,9 @@ impl Player {
         let audio_q = self.aout.as_ref().filter(|a| !a.finished).map(|a| (a.tx.len() + a.pending.len()) as u64 * OPUS_PACKET_MS);
         let audio_done = self.audio.as_ref().is_none_or(Stream::fetched_all) && self.aout.as_ref().is_none_or(|a| a.pending.is_empty());
         let video_done = self.video.as_ref().is_none_or(Stream::fetched_all) && self.vout.as_ref().is_none_or(|v| v.pending.is_empty());
-        let video_q = self.vout.as_ref().map(|v| v.tx.len() + v.pending.len() + v.ready.len());
-        let has_frame = self.vout.as_ref().is_none_or(|v| !v.ready.is_empty() || v.current.is_some());
+        // In the background no picture is shown, so video never holds up the sound.
+        let video_q = self.vout.as_ref().filter(|_| !self.background).map(|v| v.tx.len() + v.pending.len() + v.ready.len());
+        let has_frame = self.background || self.vout.as_ref().is_none_or(|v| !v.ready.is_empty() || v.current.is_some());
         let starving = audio_q.is_some_and(|q| q < LOW_AUDIO_MS && !audio_done) || video_q.is_some_and(|q| q == 0 && !video_done);
         if !self.buffering && starving {
             self.buffering = true;
