@@ -1,6 +1,6 @@
 # On-device screenshot: implementation report
 
-Status: DONE_WITH_CONCERNS. On-device capture works on the real board in portrait, after a tap and in landscape. The passcode-refusal check was not run on hardware: the board dropped off USB (host over-current fault) before that session could flash.
+Status: DONE. On-device capture works on the real board in portrait, after a tap, in landscape, and in every screen power state. Capture is refused while a passcode is being typed. The branch is merged with main bbe05c5, which adds power management.
 
 ## What was built
 
@@ -53,10 +53,20 @@ Status: DONE_WITH_CONCERNS. On-device capture works on the real board in portrai
 - `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-media --target aarch64-unknown-linux-gnu` passes (169 + 1 + 11 + 12 + 10 tests).
 - `python3 -m unittest discover -s scripts -p 'test_*.py'` passes (15 tests).
 
+## Merge with power management (main bbe05c5)
+
+- `display::present_with` keeps both behaviours. While the panel sleeps, it still takes the flip gate, writes the buffer back from the cache, and records `FRONT` and the frame flags. A screenshot of a sleeping screen therefore returns the last frame the GUI drew.
+- `gui.rs` keeps both `frame_info` and `set_screen`. The shell help line and the Vietnamese docs list both sets of commands.
+
+## Second board session (merged build)
+
+- Screen states, using `power screen on|dim|off`: every capture succeeded. Captures in Dim and Off match the On capture except for 0.05-0.06 % of pixels, which is the status-bar clock and CPU text changing. Board time stays at 23-35 ms capture, 18-58 ms encode and 95-125 ms send.
+- With the CPU pinned at 40 MHz (`power freq 40`), the first attempt saw no frame. The automatic retry succeeded in 0.18 s. The likely cause is the existing race where the GUI thread also reads console bytes and can take part of a typed command. The retry covers it.
+- Passcode refusal: I set passcode 1111 in Settings, ran `lock now`, and capture worked on the empty keypad. After tapping one digit, `screenshot.py` exited 1 with "refused while a passcode is being typed", and `screenshot sd` was refused too. After backspace, capture worked again. Then `lock reset CLEAR-PASSCODE` ran; `lock` now reports "off, passcode not set", the same as before the session.
+
 ## Still needs hardware verification
 
-1. Passcode refusal on the board. The script is ready at `scratchpad/lock-session.sh`. It sets passcode 1111 in Settings, runs `lock now`, taps one digit, expects `screenshot: refused while a passcode is being typed`, presses backspace, expects a capture to succeed, then runs `lock reset CLEAR-PASSCODE`. The logic is unit-tested (`typed_digits_are_reported_until_submitted`).
-2. The BOOT-button capture and its flash. This needs a physical button press. It shares its code with `screenshot sd`, which was verified on the board.
+- The BOOT-button capture and its flash need a physical button press, so that is left for the user. It uses the same save code as `screenshot sd`, which was verified on the board.
 
 ## Notes
 

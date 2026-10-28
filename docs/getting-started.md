@@ -55,6 +55,7 @@ Cách kiểm tra giao diện mặc định là lấy thẳng framebuffer của O
 - Giao thức: dấu bắt đầu `ESC[P4SHOT`, header 16 byte (rộng, cao, định dạng, kiểu nén, độ dài), dữ liệu, CRC-32, dấu kết thúc `ESC[P4END]`. Chi tiết nằm ở `media/src/shot.rs`. Trong lúc truyền, log của các thread khác phải chờ. Log từ ngắt vẫn có thể chen vào, khi đó CRC sẽ sai và host tự chụp lại.
 - Đo trên board: chép framebuffer mất 23 ms. Ở chế độ `fast`, một màn hình giao diện nén còn 15–29 KB, cả lần chụp trọn vẹn tính từ host mất 0,2–0,3 s. Ở chế độ `raw`, 768 KB truyền mất khoảng 2,5 s (USB-Serial-JTAG đạt khoảng 330 KB/s). `screenshot sd` tạo PNG khoảng 1,15 MB (không nén) và ghi vào thẻ mất khoảng 3,6 s.
 - Ảnh được chép khi đang giữ khoá lật trang của màn hình, nên không bao giờ bị xé hình. GUI chỉ phải chờ vài chục ms.
+- Chụp được ở mọi trạng thái màn hình (sáng, giảm sáng, tắt). Khi panel đang ngủ, ảnh là khung hình cuối cùng GUI đã vẽ.
 - **Không chụp khi đang nhập mã**: nếu màn hình khoá đã có chữ số được gõ, lệnh trả về `screenshot: refused while a passcode is being typed`.
 - Chưa dùng bộ mã hoá JPEG phần cứng: driver phức tạp và JPEG làm mất dữ liệu. RLE thì đủ nhanh và giữ nguyên từng pixel.
 - Camera vẫn là cách duy nhất để xác nhận panel thật sự sáng (đèn nền, khởi tạo panel, màn hình đen). Ảnh chụp trên board chỉ cho biết OS đã vẽ gì.
