@@ -9,6 +9,7 @@ mod app_desc;
 mod apploader;
 mod audio;
 mod backlight;
+mod battery;
 mod bench;
 mod boot;
 mod c6;
@@ -26,6 +27,7 @@ mod i2c;
 mod irq;
 mod mmio;
 mod net;
+mod power;
 mod proto;
 mod pmp;
 mod psram;
@@ -107,6 +109,7 @@ extern "C" fn kmain() -> ! {
         kprintln!("fs: no SD card filesystem ({})", e);
     }
     config::init();
+    power::init();
     // After every boot step that runs with interrupts masked (flash reads
     // in config::init included), so the first tick is not counted late.
     time::resync();
