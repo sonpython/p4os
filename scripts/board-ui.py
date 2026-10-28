@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Drive the p4os GUI on the board from the shell and capture the result
-with the camera. Each argument is a shell command (e.g. "tap 80 132") or
-"shot NAME" to save docs-free captures under out/board/NAME.png.
+"""Drive the p4os GUI on the board from the shell and capture the result.
+Each argument is a shell command (e.g. "tap 80 132"), "wait S", or
+"shot NAME" to save a capture under out/board/NAME.png. Captures come
+from the board's framebuffer (scripts/screenshot.py); the camera
+(scripts/cam.py shot) is used only when that fails. Each shot prints its
+source. Run it inside scripts/board-lock.sh.
 
 Example: board-ui.py "tap 80 132" "shot calculator"
 """
@@ -23,13 +26,25 @@ def send(cmd: str) -> None:
     s.close()
 
 
+def shot(path: Path) -> None:
+    """On-device capture first; the camera only when that fails."""
+    try:
+        ok = subprocess.run([sys.executable, str(ROOT / "screenshot.py"), "-o", str(path)], timeout=60).returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    if ok:
+        print(f"{path} (source: on-device framebuffer)")
+        return
+    print("on-device capture failed, falling back to the camera", file=sys.stderr)
+    subprocess.run([sys.executable, str(ROOT / "cam.py"), "shot", str(path)], check=True, timeout=120)
+    print(f"{path} (source: camera)")
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for arg in sys.argv[1:]:
         if arg.startswith("shot "):
-            path = OUT / f"{arg[5:].strip()}.png"
-            subprocess.run([sys.executable, str(ROOT / "cam.py"), "shot", str(path)], check=True)
-            print(path)
+            shot(OUT / f"{arg[5:].strip()}.png")
         elif arg.startswith("wait "):
             time.sleep(float(arg[5:]))
         else:
