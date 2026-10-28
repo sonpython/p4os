@@ -6,6 +6,7 @@ extern crate alloc;
 extern crate p4os_mem;
 
 mod app_desc;
+mod appctl;
 mod apploader;
 mod audio;
 mod backlight;
@@ -23,6 +24,7 @@ mod gpio;
 mod gui;
 mod heap;
 mod i2c;
+mod memtag;
 mod irq;
 mod mmio;
 mod net;

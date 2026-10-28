@@ -49,6 +49,9 @@ static mut RING: Ring = Ring { desc: [[0; 3]; DESCRIPTORS], _pad: [0; 4], bufs: 
 
 static BUFFER_DONE: Semaphore = Semaphore::new(0);
 static SOURCE: Mutex<Option<Box<dyn AudioSource>>> = Mutex::new(None);
+/// Heap owner (app) that queued the source: its decoder's allocations and
+/// the final free are charged to that app rather than the audio thread.
+static SOURCE_OWNER: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 static PLAYING: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 /// Frames played; 32 bits last ~27 hours at 44.1 kHz (RV32 has no 64-bit atomics).
@@ -258,6 +261,7 @@ fn audio_thread(_: usize) {
         let mut filled = 0;
         if PLAYING.load(Ordering::Acquire) && !PAUSED.load(Ordering::Relaxed) {
             let mut src = SOURCE.lock();
+            let owner = crate::memtag::set_current(SOURCE_OWNER.load(Ordering::Relaxed));
             if let Some(s) = src.as_mut() {
                 if s.sample_rate() != RATE.load(Ordering::Relaxed) {
                     set_rate(s.sample_rate());
@@ -274,6 +278,7 @@ fn audio_thread(_: usize) {
                     PLAYING.store(false, Ordering::Release);
                 }
             }
+            crate::memtag::set_current(owner);
         }
         let vol = VOLUME.load(Ordering::Relaxed) as i32;
         let base = ring_buf(idx) + UNCACHED;
@@ -297,7 +302,10 @@ impl p4os_sdk::Audio for Speaker {
             kprintln!("audio: not initialised");
             return;
         }
-        *SOURCE.lock() = Some(source);
+        let mut slot = SOURCE.lock();
+        SOURCE_OWNER.store(crate::memtag::current(), Ordering::Relaxed);
+        *slot = Some(source);
+        drop(slot);
         POSITION.store(0, Ordering::Relaxed);
         PAUSED.store(false, Ordering::Relaxed);
         PLAYING.store(true, Ordering::Release);

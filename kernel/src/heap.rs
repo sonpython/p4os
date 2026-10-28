@@ -215,7 +215,11 @@ unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
 /// allocator would send large blocks to PSRAM). Returns null when SRAM has
 /// no fitting block. Free with the global allocator (`alloc::alloc::dealloc`).
 pub fn alloc_sram(layout: Layout) -> *mut u8 {
-    unsafe { pool_alloc(&SRAM, block_size(&layout), layout.align().max(GRANULE)) }
+    let p = unsafe { pool_alloc(&SRAM, block_size(&layout), layout.align().max(GRANULE)) };
+    if !p.is_null() {
+        crate::memtag::charge(false, block_size(&layout));
+    }
+    p
 }
 
 unsafe impl GlobalAlloc for Heap {
@@ -223,15 +227,20 @@ unsafe impl GlobalAlloc for Heap {
         let size = block_size(&layout);
         let align = layout.align().max(GRANULE);
         let (first, second) = if size >= LARGE { (&PSRAM, &SRAM) } else { (&SRAM, &PSRAM) };
-        unsafe {
+        let p = unsafe {
             let p = pool_alloc(first, size, align);
             if p.is_null() { pool_alloc(second, size, align) } else { p }
+        };
+        if !p.is_null() {
+            crate::memtag::charge(is_psram(p as usize), size);
         }
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let size = block_size(&layout);
         let pool = if is_psram(ptr as usize) { &PSRAM } else { &SRAM };
+        crate::memtag::credit(is_psram(ptr as usize), size);
         let mut st = pool.lock();
         st.used -= size;
         unsafe { insert_free(&mut st, ptr as usize, size) };

@@ -11,11 +11,17 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use p4os_apps::desktop::Desktop;
+use p4os_apps::wm::gesture::swipe_point;
 use p4os_sdk::gui::ui::{Input, Key};
 use p4os_sdk::config;
 use p4os_sdk::*;
 
 const IDLE_POLL_MS: u32 = 16;
+/// How often the built-in apps' usage is published for the shell `top`.
+const PUBLISH_MS: u64 = 1000;
+/// Frames asked for this soon count as animation frames (gestures,
+/// transitions) for the frame-rate log.
+const ANIM_FRAME_MS: u32 = 16;
 
 pub fn start() {
     sched::spawn("gui", 3, 48 * 1024, run, 0);
@@ -32,6 +38,8 @@ fn run(_: usize) {
     let mut sys = KernelSystem::restored();
     let mut input = Input::default();
     let mut next_frame_at = 0u64;
+    let mut last_publish = 0u64;
+    let mut anim = AnimStats::default();
 
     loop {
         let forced = display::OVERRIDE.load(core::sync::atomic::Ordering::Relaxed);
@@ -56,10 +64,12 @@ fn run(_: usize) {
         }
         let (w, h) = sys.orientation.size();
         let started = systimer::now_ticks();
+        FRAME_STARTED.store((now as u32).max(1), core::sync::atomic::Ordering::Relaxed);
         let next = {
             let mut canvas = Canvas::new(&mut logical, w, h);
             desktop.frame(&mut canvas, &input, &mut sys)
         };
+        FRAME_STARTED.store(0, core::sync::atomic::Ordering::Relaxed);
         input.pressed = false;
         input.released = false;
         input.delta = Point::default();
@@ -71,12 +81,68 @@ fn run(_: usize) {
         buffers.swap(0, 1);
         sys.last_frame_us = ((render_done - started) / systimer::TICKS_PER_US) as u32;
         sys.last_present_us = ((systimer::now_ticks() - render_done) / systimer::TICKS_PER_US) as u32;
+        anim.record(next.is_some_and(|n| n <= ANIM_FRAME_MS), sys.last_frame_us, sys.last_present_us, now);
         next_frame_at = now + next.unwrap_or(1000) as u64;
+        if now.saturating_sub(last_publish) >= PUBLISH_MS {
+            last_publish = now;
+            crate::appctl::publish_builtin(desktop.app_usage());
+        }
     }
 }
 
 fn now_ms() -> u64 {
     systimer::now_ticks() / (systimer::TICKS_PER_US * 1000)
+}
+
+/// Tick (ms, never 0) at which the frame being rendered started; 0 while
+/// the GUI thread is between frames.
+static FRAME_STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// How long the GUI thread has been inside the current frame, if it is in
+/// one: a frame handler that never returns shows up here (shell `top`).
+pub fn busy_ms() -> Option<u32> {
+    let started = FRAME_STARTED.load(core::sync::atomic::Ordering::Relaxed);
+    (started != 0).then(|| (now_ms() as u32).wrapping_sub(started))
+}
+
+/// Frame times of a run of animation frames, logged when the run ends.
+#[derive(Default)]
+struct AnimStats {
+    frames: u32,
+    render_us: u64,
+    present_us: u64,
+    worst_us: u32,
+    first_ms: u64,
+    last_ms: u64,
+}
+
+impl AnimStats {
+    fn record(&mut self, animating: bool, render_us: u32, present_us: u32, now: u64) {
+        if animating {
+            if self.frames == 0 {
+                self.first_ms = now;
+            }
+            self.frames += 1;
+            self.render_us += render_us as u64;
+            self.present_us += present_us as u64;
+            self.worst_us = self.worst_us.max(render_us + present_us);
+            self.last_ms = now;
+            return;
+        }
+        if self.frames >= 2 {
+            let n = self.frames as f32;
+            let span = self.last_ms.saturating_sub(self.first_ms).max(1) as f32;
+            kprintln!(
+                "gui: {} animation frames, {:.1} fps, render {:.1} ms + present {:.1} ms avg, worst {:.1} ms",
+                self.frames,
+                (n - 1.0) * 1000.0 / span,
+                self.render_us as f32 / n / 1000.0,
+                self.present_us as f32 / n / 1000.0,
+                self.worst_us as f32 / 1000.0
+            );
+        }
+        *self = AnimStats::default();
+    }
 }
 
 /// Copy the logical frame into the panel buffer. Landscape frames are
@@ -115,38 +181,58 @@ pub fn request_lock() {
     LOCK_REQUEST.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// A tap requested from the shell (`tap X Y`, logical coordinates), used
-/// for automated UI tests: pressed on one frame, released on the next.
-static INJECTED_TAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static INJECT_STAGE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// A touch scripted from the shell (`tap X Y`, `swipe X1 Y1 X2 Y2 MS
+/// [hold]`, logical coordinates), used for automated UI tests. The finger
+/// follows the path in real time, sampled once per GUI loop pass.
+struct Injection {
+    from: Point,
+    to: Point,
+    ms: u64,
+    hold: u64,
+    /// When the first sample was taken.
+    start: Option<u64>,
+}
+
+static INJECTION: crate::spin::SpinLock<Option<Injection>> = crate::spin::SpinLock::new(None);
+/// Rest before lifting for `swipe ... hold`: above the 300 ms the app
+/// switcher gesture needs.
+const SWIPE_HOLD_MS: u64 = 400;
 
 pub fn inject_tap(x: u16, y: u16) {
-    use core::sync::atomic::Ordering;
-    INJECTED_TAP.store(((x as u32) << 16) | y as u32, Ordering::Relaxed);
-    INJECT_STAGE.store(1, Ordering::Release);
+    inject_swipe((x, y), (x, y), 0, false);
+}
+
+pub fn inject_swipe(from: (u16, u16), to: (u16, u16), ms: u32, hold: bool) {
+    let p = |(x, y): (u16, u16)| Point::new(x as i32, y as i32);
+    let hold = if hold { SWIPE_HOLD_MS } else { 0 };
+    *INJECTION.lock() = Some(Injection { from: p(from), to: p(to), ms: ms as u64, hold, start: None });
 }
 
 fn poll_injected(input: &mut Input) -> bool {
-    use core::sync::atomic::Ordering;
-    let v = INJECTED_TAP.load(Ordering::Relaxed);
-    let pos = Point::new((v >> 16) as i32, (v & 0xFFFF) as i32);
-    match INJECT_STAGE.load(Ordering::Acquire) {
-        1 => {
-            input.pressed = true;
+    let now = now_ms();
+    let mut slot = INJECTION.lock();
+    let Some(inj) = slot.as_mut() else { return false };
+    let start = *inj.start.get_or_insert(now);
+    match swipe_point(inj.from, inj.to, inj.ms, inj.hold, now - start) {
+        Some(p) => {
+            if !input.down {
+                input.pressed = true;
+                input.press_pos = p;
+                input.pos = p;
+            }
+            input.delta = Point::new(p.x - input.pos.x, p.y - input.pos.y);
+            input.pos = p;
             input.down = true;
-            input.press_pos = pos;
-            input.pos = pos;
-            INJECT_STAGE.store(2, Ordering::Release);
-            true
+            input.fingers = 1;
         }
-        2 => {
+        None => {
             input.down = false;
             input.released = true;
-            INJECT_STAGE.store(0, Ordering::Release);
-            true
+            input.fingers = 0;
+            *slot = None;
         }
-        _ => false,
     }
+    true
 }
 
 /// Read the GT911 and convert panel coordinates into the logical screen.
@@ -171,11 +257,13 @@ fn poll_touch(input: &mut Input, o: Orientation) -> bool {
             input.delta = Point::new(pos.x - input.pos.x, pos.y - input.pos.y);
             input.pos = pos;
             input.down = true;
+            input.fingers = p.count;
             true
         }
         None if input.down => {
             input.down = false;
             input.released = true;
+            input.fingers = 0;
             true
         }
         None => false,
@@ -376,6 +464,36 @@ impl System for KernelSystem {
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         crate::rng::fill(buf);
         true
+    }
+
+    fn uptime_us(&self) -> u64 {
+        systimer::now_ticks() / systimer::TICKS_PER_US
+    }
+
+    fn log(&mut self, msg: &str) {
+        kprintln!("{}", msg);
+    }
+
+    fn set_heap_owner(&mut self, owner: u8) -> u8 {
+        crate::memtag::set_current(owner)
+    }
+
+    fn heap_owner_usage(&self, owner: u8) -> (usize, usize) {
+        crate::memtag::usage(owner)
+    }
+
+    fn clear_heap_owner(&mut self, owner: u8) {
+        crate::memtag::clear(owner)
+    }
+
+    fn running_apps(&self) -> alloc::vec::Vec<AppUsage> {
+        crate::appctl::user_apps()
+    }
+
+    fn close_app(&mut self, app: AppHandle) {
+        if let AppHandle::User(tid) = app {
+            crate::appctl::kill(tid as usize);
+        }
     }
 }
 

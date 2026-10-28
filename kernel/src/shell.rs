@@ -49,12 +49,19 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi lock get smpdemo apps run pmp"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi lock get smpdemo apps run start kill top tap swipe pmp"
         ),
         "flash" => crate::flash::diagnose(),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
-        c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
+        c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim(), true),
+        c if c == "start" || c.starts_with("start ") => run_app(c[5..].trim(), false),
+        c if c.starts_with("kill ") => match c[5..].trim().parse::<usize>() {
+            Ok(tid) if crate::appctl::kill(tid) => kprintln!("killing app thread {}", tid),
+            Ok(tid) => kprintln!("kill: thread {} runs no user app", tid),
+            Err(_) => kprintln!("usage: kill THREAD (see top)"),
+        },
+        "top" => crate::appctl::print_top(),
         "config" | "config list" => config_list(),
         c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
             Ok(n) => config_stress(n),
@@ -100,6 +107,21 @@ fn execute(cmd: &str, serial: bool) {
                 _ => kprintln!("usage: tap X Y"),
             }
         }
+        c if c.starts_with("swipe ") => {
+            let parts: alloc::vec::Vec<&str> = c[6..].split_whitespace().collect();
+            let n: alloc::vec::Vec<Option<u16>> = parts.iter().take(5).map(|v| v.parse().ok()).collect();
+            let hold = match parts.get(5).copied() {
+                None => Some(false),
+                Some("hold") => Some(true),
+                Some(_) => None,
+            };
+            match (n.as_slice(), hold) {
+                ([Some(x1), Some(y1), Some(x2), Some(y2), Some(ms)], Some(hold)) if parts.len() <= 6 => {
+                    crate::gui::inject_swipe((*x1, *y1), (*x2, *y2), *ms as u32, hold)
+                }
+                _ => kprintln!("usage: swipe X1 Y1 X2 Y2 MS [hold]"),
+            }
+        }
         c if c.starts_with("bl ") => match c[3..].trim().parse::<u32>() {
             Ok(pct) => crate::backlight::set(pct as f32 / 100.0),
             Err(_) => kprintln!("usage: bl 0..100"),
@@ -138,22 +160,24 @@ fn pmp_survey() {
 
 /// `run SLOT [ARG]`: start the user app in a flash slot and wait for it to
 /// end. The kernel logs how it ended (exit code or the fault that killed it).
-fn run_app(args: &str) {
+/// `start SLOT [ARG]` does not wait. Both go through the user-app limits.
+fn run_app(args: &str, wait: bool) {
     let mut it = args.split_whitespace().map(str::parse::<u32>);
     let (slot, arg) = match (it.next(), it.next(), it.next()) {
         (Some(Ok(slot)), None, None) => (slot, 0),
         (Some(Ok(slot)), Some(Ok(arg)), None) => (slot, arg),
         _ => {
-            kprintln!("usage: run SLOT [ARG]");
+            kprintln!("usage: run|start SLOT [ARG]");
             return;
         }
     };
-    match crate::apploader::run(slot as usize, arg) {
-        Ok((_, status)) => {
+    match crate::appctl::start(slot as usize, arg) {
+        Ok((_, status)) if wait => {
             while status.outcome().is_none() {
                 sched::sleep_ms(10);
             }
         }
+        Ok((tid, _)) => kprintln!("started in thread {}", tid),
         Err(e) => kprintln!("run: slot {}: {}", slot, e),
     }
 }

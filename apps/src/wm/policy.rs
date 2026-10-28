@@ -209,6 +209,69 @@ impl CpuMeter {
     }
 }
 
+/// CPU budget of an isolated user-mode app, enforced by the kernel from
+/// the scheduler's per-thread tick accounting (1 tick = 1 ms).
+#[derive(Clone, Copy, Debug)]
+pub struct TickBudget {
+    pub window_ms: u32,
+    /// Ticks per window the app may run, in 1/1000 of the window.
+    pub permille: u32,
+    /// Throttled windows in a row before the app is killed.
+    pub kill_after: u32,
+    window_start: u32,
+    window_base: u32,
+    throttled: bool,
+    pub over_windows: u32,
+    /// CPU share used in the last complete window.
+    pub last_permille: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickDecision {
+    Run,
+    /// Keep the app off the CPU until this tick (end of the window).
+    Throttle(u32),
+    Kill,
+}
+
+impl TickBudget {
+    pub fn new(window_ms: u32, permille: u32, kill_after: u32, now: u32, run_ticks: u32) -> Self {
+        Self {
+            window_ms,
+            permille,
+            kill_after,
+            window_start: now,
+            window_base: run_ticks,
+            throttled: false,
+            over_windows: 0,
+            last_permille: 0,
+        }
+    }
+
+    pub fn throttled(&self) -> bool {
+        self.throttled
+    }
+
+    /// Account the app's run ticks at tick `now` (both wrap).
+    pub fn check(&mut self, now: u32, run_ticks: u32) -> TickDecision {
+        let elapsed = now.wrapping_sub(self.window_start);
+        let used = run_ticks.wrapping_sub(self.window_base);
+        if elapsed >= self.window_ms {
+            self.last_permille = (used as u64 * 1000 / elapsed.max(1) as u64).min(1000) as u16;
+            self.over_windows = if self.throttled { self.over_windows + 1 } else { 0 };
+            self.window_start = now;
+            self.window_base = run_ticks;
+            self.throttled = false;
+            return if self.over_windows >= self.kill_after { TickDecision::Kill } else { TickDecision::Run };
+        }
+        if !self.throttled && used as u64 * 1000 >= self.window_ms as u64 * self.permille as u64 {
+            self.throttled = true;
+            return TickDecision::Throttle(self.window_start.wrapping_add(self.window_ms));
+        }
+        TickDecision::Run
+    }
+}
+
 /// Counts slow foreground frames.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HangWatch {
@@ -360,6 +423,39 @@ mod tests {
         assert_eq!(f.permille, 900);
         assert_eq!(f.over_windows, 0);
         assert_eq!(f.total_us, 900_000);
+    }
+
+    #[test]
+    fn tick_budget_throttles_then_kills_a_spinning_app() {
+        // 25% of 1000 ms, killed after 3 throttled windows in a row.
+        let mut b = TickBudget::new(1000, 250, 3, 0, 0);
+        assert_eq!(b.check(100, 100), TickDecision::Run);
+        assert_eq!(b.check(250, 250), TickDecision::Throttle(1000));
+        assert!(b.throttled());
+        // Held off the CPU: no new decision until the window ends.
+        assert_eq!(b.check(600, 260), TickDecision::Run);
+        assert_eq!(b.check(1000, 260), TickDecision::Run);
+        assert_eq!(b.last_permille, 260);
+        assert_eq!(b.over_windows, 1);
+        assert_eq!(b.check(1250, 510), TickDecision::Throttle(2000));
+        assert_eq!(b.check(2000, 510), TickDecision::Run);
+        assert_eq!(b.check(2250, 760), TickDecision::Throttle(3000));
+        assert_eq!(b.check(3000, 760), TickDecision::Kill);
+    }
+
+    #[test]
+    fn tick_budget_forgives_an_app_that_calms_down() {
+        let mut b = TickBudget::new(1000, 250, 2, 5000, 70);
+        assert_eq!(b.check(5300, 330), TickDecision::Throttle(6000));
+        assert_eq!(b.check(6000, 330), TickDecision::Run);
+        assert_eq!(b.over_windows, 1);
+        // A quiet window resets the count.
+        assert_eq!(b.check(7000, 400), TickDecision::Run);
+        assert_eq!(b.over_windows, 0);
+        assert_eq!(b.last_permille, 70);
+        // Tick counters wrap.
+        let mut w = TickBudget::new(1000, 250, 2, u32::MAX - 100, u32::MAX - 10);
+        assert_eq!(w.check(u32::MAX.wrapping_add(200), 245), TickDecision::Throttle(u32::MAX.wrapping_add(900)));
     }
 
     #[test]

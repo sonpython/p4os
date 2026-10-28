@@ -74,7 +74,8 @@ impl Switcher {
 
     pub fn show(&mut self, ui: &mut Ui, area: Rect, cards: &[Card], now: u64) -> Option<Action> {
         let t = *ui.theme;
-        ui.canvas.fill_gradient(area, Color::hex(0x141b2b), Color::hex(0x07090e));
+        // A flat fill: a gradient this dark bands visibly in RGB565.
+        ui.canvas.fill_rect(area, Color::hex(0x0d1119));
         let (head, rest) = area.split_top(HEADER_H);
         let title_f = ui.fonts.title;
         ui.text(Rect::new(head.x + 20, head.y, head.w / 2, head.h), "Recent apps", &title_f, t.text, Align::Left);

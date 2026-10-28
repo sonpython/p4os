@@ -14,6 +14,8 @@ pub struct Point {
     /// Panel coordinates in its native portrait space (0..480, 0..800).
     pub x: i32,
     pub y: i32,
+    /// Fingers on the panel (1..=5); the point is the first one.
+    pub count: u8,
 }
 
 fn reg(r: u16) -> [u8; 2] {
@@ -41,7 +43,7 @@ pub fn poll() -> Result<Option<Point>, ()> {
         if i2c::write_read(ADDR, &reg(REG_POINT0), &mut p).is_ok() {
             let x = u16::from_le_bytes([p[1], p[2]]) as i32;
             let y = u16::from_le_bytes([p[3], p[4]]) as i32;
-            result = Some(Point { x, y });
+            result = Some(Point { x, y, count });
         }
     }
     // The GT911 stops updating until the status register is cleared.

@@ -126,7 +126,9 @@ pub fn list() {
 }
 
 /// Load the app in `slot` into fresh RAM and start it with `arg` in a0.
-pub fn run(slot: usize, arg: u32) -> Result<(usize, Arc<AppStatus>), LoadError> {
+/// Returns its thread id, completion status and RAM base address. Use
+/// `appctl::start`, which applies the user-app limits.
+pub fn run(slot: usize, arg: u32) -> Result<(usize, Arc<AppStatus>, usize), LoadError> {
     let image = Image::parse(slot_bytes(slot)?)?;
     let hart = pmp::app_hart().map_err(LoadError::Unsupported)?;
     let h = image.header;
@@ -147,7 +149,8 @@ pub fn run(slot: usize, arg: u32) -> Result<(usize, Arc<AppStatus>), LoadError> 
     // Logged before the start: the app runs on another core and would
     // interleave its own output with this line.
     kprintln!("app '{}': core {}, {} bytes RAM at {:#010x}", h.name(), hart, h.ram_size(), base);
-    Ok(usermode::spawn(hart, THREAD_NAMES[slot], app))
+    let (tid, status) = usermode::spawn(hart, THREAD_NAMES[slot], app);
+    Ok((tid, status, base as usize))
 }
 
 /// Make freshly written code visible to instruction fetch: write the data
