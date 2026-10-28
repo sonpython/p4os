@@ -4,7 +4,8 @@ use crate::sched::{self, State};
 use crate::sync::Mutex;
 use crate::{clock, console, heap, kprint, kprintln, time};
 
-const MAX_LINE: usize = 64;
+/// Room for `wifi save` with a 32-byte SSID and a 63-character password.
+const MAX_LINE: usize = 128;
 
 pub fn run(_: usize) {
     let mut line = [0u8; MAX_LINE];
@@ -43,7 +44,15 @@ pub fn capture(cmd: &str) -> alloc::string::String {
 fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
-        "help" => kprintln!("commands: help uptime clock irq ps mem demo membench lcd hwscan"),
+        "help" => kprintln!(
+            "commands: help uptime clock irq ps mem demo membench lcd hwscan flash config wifi get"
+        ),
+        "flash" => crate::flash::diagnose(),
+        "config" | "config list" => config_list(),
+        "wifi" => wifi_status(),
+        "wifi forget" => wifi_forget(),
+        c if c.starts_with("wifi save ") => wifi_join(c["wifi save ".len()..].trim(), true),
+        c if c.starts_with("wifi connect ") => wifi_join(c["wifi connect ".len()..].trim(), false),
         "membench" => membench(),
         "lcd" => crate::display::diagnose(),
         "hwscan" => hwscan(),
@@ -51,16 +60,6 @@ fn execute(cmd: &str) {
         "audio" => crate::audio::diagnose(),
         "c6" => crate::c6::probe(),
         c if c.starts_with("get ") => http_get(c[4..].trim()),
-        c if c.starts_with("wifi connect ") => {
-            let mut it = c["wifi connect ".len()..].splitn(2, ' ');
-            match (it.next(), it.next()) {
-                (Some(ssid), Some(pass)) => match crate::wifi::connect(ssid, pass) {
-                    Ok(()) => kprintln!("wifi: up"),
-                    Err(e) => kprintln!("wifi: {}", e),
-                },
-                _ => kprintln!("usage: wifi connect SSID PASSWORD"),
-            }
-        }
         c if c.starts_with("tone") => {
             use p4os_sdk::Audio;
             let freq = c[4..].trim().parse().unwrap_or(1000);
@@ -305,5 +304,71 @@ fn http_get(url: &str) {
                 return;
             }
         }
+    }
+}
+
+/// Print the settings; secrets show only whether they are set.
+fn config_list() {
+    let entries = crate::config::entries();
+    if entries.is_empty() {
+        kprintln!("config: empty");
+    }
+    for (k, v) in entries {
+        let shown = if p4os_sdk::config::is_secret(&k) { "[set]" } else { v.as_str() };
+        kprintln!("{} = {}", k, shown);
+    }
+}
+
+fn wifi_status() {
+    use crate::wifi_auto::Phase;
+    let ssid = crate::config::get(p4os_sdk::config::WIFI_SSID);
+    kprintln!("saved network: {}", ssid.as_deref().unwrap_or("none"));
+    match (crate::wifi_auto::phase(), crate::net::ip()) {
+        (Phase::Up, Some(ip)) => kprintln!("link: up, {}", ip),
+        (Phase::Up, None) => kprintln!("link: associated, waiting for DHCP"),
+        (Phase::Connecting, _) => kprintln!("link: connecting"),
+        (Phase::Retrying { error, .. }, _) => kprintln!("link: down ({}), retrying", error),
+        (Phase::Idle, _) => kprintln!("link: down"),
+    }
+}
+
+/// `wifi connect|save SSID [PASSWORD]`: join through the background
+/// manager and report the first attempt. The password is never printed.
+fn wifi_join(args: &str, save: bool) {
+    let (ssid, password) = args.split_once(' ').unwrap_or((args, ""));
+    let password = password.trim();
+    if let Err(e) = p4os_sdk::config::check_wifi(ssid, password) {
+        kprintln!("wifi: {}", e);
+        kprintln!("usage: wifi {} SSID [PASSWORD]", if save { "save" } else { "connect" });
+        return;
+    }
+    if save {
+        use p4os_sdk::config::{WIFI_PASSWORD, WIFI_SSID};
+        let saved = crate::config::update(|e| {
+            e.insert(WIFI_SSID.into(), ssid.into());
+            e.insert(WIFI_PASSWORD.into(), password.into());
+        });
+        match saved {
+            Ok(()) => kprintln!("config: saved Wi-Fi network '{}'", ssid),
+            Err(e) => kprintln!("config: saving failed: {:?}", e),
+        }
+    }
+    let generation = crate::wifi_auto::request(ssid, password);
+    match crate::wifi_auto::wait(generation, 45_000) {
+        Some(Ok(())) => kprintln!("wifi: up"),
+        Some(Err(e)) => kprintln!("wifi: {} (retrying in the background)", e),
+        None => kprintln!("wifi: still connecting in the background"),
+    }
+}
+
+fn wifi_forget() {
+    use p4os_sdk::config::{WIFI_PASSWORD, WIFI_SSID};
+    crate::wifi_auto::cancel();
+    match crate::config::update(|e| {
+        e.remove(WIFI_SSID);
+        e.remove(WIFI_PASSWORD);
+    }) {
+        Ok(()) => kprintln!("wifi: saved network forgotten (an active link stays up until reset)"),
+        Err(e) => kprintln!("config: saving failed: {:?}", e),
     }
 }

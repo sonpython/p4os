@@ -236,6 +236,15 @@ impl<'f, 'c> Ui<'f, 'c> {
     /// Single-line text field. Focus follows taps; while focused it consumes
     /// typed keys. Returns true when Enter is pressed.
     pub fn text_field(&mut self, r: Rect, value: &mut String, placeholder: &str) -> bool {
+        self.field(r, value, placeholder, false)
+    }
+
+    /// Like [`Ui::text_field`], but shows one `*` per character.
+    pub fn password_field(&mut self, r: Rect, value: &mut String, placeholder: &str) -> bool {
+        self.field(r, value, placeholder, true)
+    }
+
+    fn field(&mut self, r: Rect, value: &mut String, placeholder: &str, masked: bool) -> bool {
         let (_, clicked) = self.interact(r);
         if clicked {
             self.state.focus = Some(r);
@@ -271,10 +280,11 @@ impl<'f, 'c> Ui<'f, 'c> {
         if value.is_empty() && !focused {
             f.draw(self.canvas, Point::new(inner.x, ty), placeholder, t.text_dim);
         } else {
+            let shown: String = if masked { value.chars().map(|_| '*').collect() } else { value.clone() };
             // Keep the end of long text (where the caret is) visible.
-            let w = f.measure(value);
+            let w = f.measure(&shown);
             let x = inner.x - (w - inner.w + 4).max(0);
-            let adv = f.draw(self.canvas, Point::new(x, ty), value, t.text);
+            let adv = f.draw(self.canvas, Point::new(x, ty), &shown, t.text);
             if focused {
                 self.canvas.fill_rect(Rect::new(x + adv + 1, ty + 2, 2, f.line_height - 4), t.accent);
             }

@@ -1,9 +1,10 @@
-//! Settings: display brightness, volume, network status, date & time and
-//! system information, arranged as a section list with a content pane.
+//! Settings: display brightness, volume, Wi-Fi, date & time and system
+//! information, arranged as a section list with a content pane.
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use p4os_sdk::config::{check_wifi, WIFI_SSID};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DateTime, Orientation, Point, Rect, System, Ui};
 
@@ -39,7 +40,7 @@ fn icon(c: &mut Canvas, r: Rect) {
 enum Section {
     Display,
     Sound,
-    Network,
+    Wifi,
     DateTime,
     About,
 }
@@ -47,7 +48,7 @@ enum Section {
 const SECTIONS: [(Section, &str); 5] = [
     (Section::Display, "Display"),
     (Section::Sound, "Sound"),
-    (Section::Network, "Network"),
+    (Section::Wifi, "Wi-Fi"),
     (Section::DateTime, "Date & time"),
     (Section::About, "About"),
 ];
@@ -162,6 +163,18 @@ struct Settings {
     draft: Option<DateTime>,
     /// Feedback after pressing Set.
     message: Option<&'static str>,
+    /// Wi-Fi form; the SSID is seeded from the saved network on opening.
+    ssid: String,
+    password: String,
+    wifi_loaded: bool,
+    wifi_message: Option<String>,
+}
+
+/// Validate the Wi-Fi form; returns the SSID to join.
+fn wifi_submission(ssid: &str, password: &str) -> Result<String, &'static str> {
+    let ssid = ssid.trim();
+    check_wifi(ssid, password)?;
+    Ok(ssid.to_string())
 }
 
 impl Settings {
@@ -234,22 +247,53 @@ impl Settings {
         }
     }
 
-    fn network(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
+    fn wifi(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
         let t = *ui.theme;
-        let r = Self::heading(ui, r, "Network");
+        let r = Self::heading(ui, r, "Wi-Fi");
+        if !self.wifi_loaded {
+            self.ssid = sys.config_get(WIFI_SSID).unwrap_or_default();
+            self.wifi_loaded = true;
+        }
         let (status, up) = {
             let net = sys.net();
             (net.status(), net.is_up())
         };
-        let p = Rect::new(r.x, r.y, r.w, 112);
+        // One status row (kept short so the form fits in landscape).
+        let p = Rect::new(r.x, r.y, r.w, 56);
         ui.panel(p);
-        let link = Rect::new(p.x, p.y, p.w, 56);
         let dot = if up { Color::hex(0x26de81) } else { t.danger };
-        ui.canvas.fill_circle(Point::new(p.right() - 30, link.y + 28), 7.0, dot);
-        Self::row(ui, Rect::new(link.x, link.y, link.w - 30, link.h), "Link", if up { "Connected" } else { "Down" });
-        ui.canvas.fill_rect(Rect::new(p.x + 18, p.y + 56, p.w - 36, 1), t.border);
+        ui.canvas.fill_circle(Point::new(p.right() - 30, p.y + 28), 7.0, dot);
         let status = if status.is_empty() { DASH.to_string() } else { status };
-        Self::row(ui, Rect::new(p.x, p.y + 56, p.w, 56), "Status", &status);
+        Self::row(ui, Rect::new(p.x, p.y, p.w - 30, p.h), "Status", &status);
+
+        // Credentials: saved and joined on Connect (or Enter in the
+        // password field, since the keyboard may cover the button).
+        let form = Rect::new(r.x, p.bottom() + 12, r.w, 3 * 56 + 2 * 10 + 32);
+        ui.panel(form);
+        let inner = form.inset(16);
+        let ssid_r = Rect::new(inner.x, inner.y, inner.w, 56);
+        let pass_r = Rect::new(inner.x, ssid_r.bottom() + 10, inner.w, 56);
+        let actions = Rect::new(inner.x, pass_r.bottom() + 10, inner.w, 56);
+        ui.text_field(ssid_r, &mut self.ssid, "Network name (SSID)");
+        let entered = ui.password_field(pass_r, &mut self.password, "Password");
+        let connect_r = Rect::new(actions.right() - 160, actions.y, 160, actions.h);
+        if ui.button_primary(connect_r, "Connect") || entered {
+            match wifi_submission(&self.ssid, &self.password) {
+                Ok(ssid) => {
+                    sys.wifi_connect(&ssid, &self.password);
+                    self.password.clear();
+                    ui.state.focus = None;
+                    self.wifi_message = Some(format!("Saved, joining {ssid}"));
+                    self.ssid = ssid;
+                }
+                Err(e) => self.wifi_message = Some(e.to_string()),
+            }
+        }
+        if let Some(msg) = &self.wifi_message {
+            let small = ui.fonts.small;
+            let msg_r = Rect::new(actions.x, actions.y, connect_r.x - actions.x - 12, actions.h);
+            ui.text(msg_r, msg, &small, t.text_dim, Align::Left);
+        }
     }
 
     fn date_time(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
@@ -355,6 +399,10 @@ impl Settings {
             // Re-seed the date editor from the clock next time.
             self.draft = None;
             self.message = None;
+            // Re-read the saved network next time; never keep a typed password.
+            self.wifi_loaded = false;
+            self.wifi_message = None;
+            self.password.clear();
         }
     }
 
@@ -362,7 +410,7 @@ impl Settings {
         match SECTIONS[self.section].0 {
             Section::Display => self.display(ui, pane, sys),
             Section::Sound => self.sound(ui, pane, sys),
-            Section::Network => self.network(ui, pane, sys),
+            Section::Wifi => self.wifi(ui, pane, sys),
             Section::DateTime => self.date_time(ui, pane, sys),
             Section::About => self.about(ui, pane, sys),
         }
@@ -429,7 +477,9 @@ impl App for Settings {
     fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) {
         let t = *ui.theme;
         ui.fill(area, t.bg);
-        if area.h > area.w {
+        // Follow the screen, not `area`: the on-screen keyboard shrinks the
+        // area, and switching layout would move the focused text field.
+        if sys.orientation() == Orientation::Portrait {
             self.stacked_layout(ui, area, sys);
         } else {
             self.sidebar_layout(ui, area, sys);
@@ -443,7 +493,7 @@ impl App for Settings {
         }
         // Keep the clock and link status live.
         match SECTIONS[self.section].0 {
-            Section::DateTime | Section::Network => Some(1000),
+            Section::DateTime | Section::Wifi => Some(1000),
             _ => None,
         }
     }
@@ -520,6 +570,14 @@ mod tests {
         let mut t = dt(MIN_YEAR, 6, 1, 0, 0);
         adjust(&mut t, Field::Year, -1);
         assert_eq!(t.year, MIN_YEAR);
+    }
+
+    #[test]
+    fn wifi_form_validation() {
+        assert_eq!(wifi_submission("  home ", "password1"), Ok("home".to_string()));
+        assert_eq!(wifi_submission("open-net", ""), Ok("open-net".to_string()));
+        assert!(wifi_submission("", "password1").is_err());
+        assert!(wifi_submission("home", "short").is_err());
     }
 
     #[test]

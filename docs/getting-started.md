@@ -44,7 +44,7 @@ Có một camera Imou nhìn thẳng vào màn hình, dùng được qua `scripts
 | Chạm giả lập rồi chụp | `python3 scripts/board-ui.py "tap 80 132" "shot calculator"` |
 | Chỉnh ảnh camera qua ONVIF (độ sáng, tương phản) | `python3 scripts/cam_onvif.py get` / `set Brightness=35` |
 | Kiểm tra loa: phát âm thử và nghe bằng micro của camera | `python3 scripts/cam_audio.py 1000` |
-| Kết nối Wi-Fi bằng thông tin lưu trong `~/.config/p4os/wifi` (mật khẩu được che trong mọi output) | `python3 scripts/wifi-connect.py` |
+| Lưu mạng Wi-Fi trong `~/.config/p4os/wifi` vào board bằng `wifi save` rồi kết nối (mật khẩu được che trong mọi output) | `python3 scripts/wifi-connect.py` |
 
 Camera tự cân sáng nên bị cháy sáng khi panel hiện màu sáng. Vì vậy hãy dùng màu tối (khoảng 0x40) khi kiểm tra.
 
@@ -52,7 +52,23 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps`, `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `membench`, `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS`, `get http://...` hoặc `get https://...` (tải một URL). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps`, `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `membench`, `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+
+## Cài đặt lưu trong flash
+
+Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
+
+| Vùng | Nội dung |
+|---|---|
+| `0x0..0x10000` | bootloader (`0x2000`), bảng phân vùng (`0x8000`) |
+| `0x10000..` | phân vùng `factory`: kernel, chạy thẳng từ flash qua cache |
+| `0x710000..0x720000` | 64 KiB đầu của phân vùng `storage`: cài đặt của kernel (`kernel/src/config.rs`) |
+| `0x720000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
+
+- Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
+- Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
 
 ## Khôi phục firmware gốc
 
