@@ -121,11 +121,20 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - Lúc nhảy vào kernel, ROM chạy core 1 trên stack riêng ngay dưới 0x4FF3EFC0. Vùng này nằm trên `_heap_end`, nên heap không bị ghi đè.
 - CLIC của từng core nằm ở cùng địa chỉ 0x20800000, và mỗi core có ma trận ngắt riêng. `irq::attach` gắn ngắt vào core đang gọi. Tick 1 kHz chạy trên core 0 và tính giờ cho cả hai core.
 - Ngắt liên core (IPI) dùng nguồn FROM_CPU 79 + hart, gắn vào đường CLIC 47 (driver lấy đường từ 16 trở lên, `bench` dùng đường 20). Ghi 1 vào `HP_SYS + 0x10 + 4·hart` để báo, bên nhận ghi 0 để xoá.
-- Scheduler, heap, `Semaphore`/`Mutex`, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): tắt ngắt trên core hiện tại rồi chờ một atomic LR/SC. `irq::free` chỉ chặn được core hiện tại. Spinlock phải là biến static trong SRAM.
+- Scheduler, heap, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): nâng ngưỡng CLIC để chặn ngắt mức kernel trên core hiện tại (xem mục dưới), rồi chờ một atomic LR/SC. `Semaphore`/`Mutex` chỉ vào scheduler khi phải chờ hoặc khi có thread đang chờ; lấy và trả khi không tranh chấp chỉ là atomic. `irq::free` chặn mọi ngắt nhưng chỉ trên core hiện tại. Spinlock phải là biến static trong SRAM.
 - Console không giữ ngắt tắt trong lúc chờ USB rút FIFO (có thể mất ~1 ms): các thread xếp hàng bằng một `Mutex`; trình xử lý ngắt và code đang giữ spinlock in thẳng ra.
 - Ghi/xoá flash tạm dừng cache, mà core kia vẫn chạy code từ flash qua cache đó. Vì vậy `smp::with_other_core_parked` gửi IPI để core kia vào một vòng lặp nằm trong SRAM (`.sram_text`, ngắt tắt, stack ngắt ở SRAM), chờ nó báo đã vào rồi mới tạm dừng cache. Trong lúc xoá một sector (~45 ms) ngắt bị tắt, nên `irq` sau khi lưu cài đặt báo độ trễ tick cỡ 48 ms; ngoài lúc đó độ trễ dưới 50 µs.
 - `mcycle` là bộ đếm riêng của từng core (core 1 bắt đầu đếm muộn hơn khoảng 1 giây), nên `bench` ghim mọi thread của nó vào core 0.
 - `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
+
+## Ngắt: mức kernel, mức nhanh và task notification
+
+- Mức 1..3 (`irq::KERNEL_LEVEL`) là **mức kernel**: handler được dùng spinlock, `Semaphore::release`, `sched::notify`. Critical section của kernel (mọi `SpinLock`) chỉ nâng ngưỡng CLIC (`0x20800008`) lên mức 3 thay vì tắt `mstatus.MIE`, nên ngắt mức 4..7 vẫn chạy khi thread đang giữ lock.
+- Mức 4..7 là **mức nhanh**: màn hình (page flip, mức 6) và audio (DMA xong, mức 5). Handler mức nhanh **không được lấy lock nào** (spinlock, semaphore, mutex, cấp phát, `mmio::set_bits`/`modify`): chỉ đọc/ghi thanh ghi, atomic và gọi `sched::notify`. Nếu code bị ngắt đang trong critical section, `notify` để việc đánh thức lại cho IPI tự gửi tới chính core đó (mức 1), chạy ngay khi critical section kết thúc.
+- Trap không lồng nhau: ngắt nhanh vẫn phải chờ handler đang chạy. Nó chỉ không còn phải chờ critical section phía thread.
+- `sched::notify(id, bits)` / `sched::wait_notify(mask)`: mỗi thread có 32 bit notification, đánh thức đúng một thread với tối đa một lần lấy scheduler lock. Bit dùng chung khai báo ở `sched::notify_bits`. Màn hình, audio và console RX dùng cơ chế này thay cho semaphore.
+- Chi phí đo bằng `bench`: vào+ra critical section bằng ngưỡng CLIC mất ~151 ns, so với ~53 ns khi bật/tắt `MIE` (ghi thanh ghi rồi đọc lại để ngưỡng có hiệu lực). `Semaphore`/`Mutex` không tranh chấp chỉ dùng atomic (mutex lock+unlock ~365 ns, trước đây ~620 ns).
+- `irq::attach` báo lỗi nếu đường CLIC đã có handler khác (lỗi cũ: IPI và alarm của `bench` dùng chung đường 20 làm `bench` treo).
 - `smpdemo` đo được 1 thread 1116 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 2 lần. `config stress 50` chạy song song với tải trên cả hai core: 100 lần lưu đều đúng và không treo.
 
 ## Heap
