@@ -216,6 +216,8 @@ pub struct Player {
     last_stats_ms: u64,
     /// Clock at the last tick.
     last_clock_ms: u64,
+    /// The screen is locked or off: play audio, skip pictures.
+    pub background: bool,
 }
 
 impl Player {
@@ -250,6 +252,7 @@ impl Player {
             window: (now, 0, 0),
             last_stats_ms: 0,
             last_clock_ms: 0,
+            background: false,
         };
         if !valid_video_id(video_id) {
             p.phase = Phase::Failed(PlayError::new(ErrorKind::Unplayable, format!("{video_id:?} is not a YouTube video id")));
@@ -852,8 +855,17 @@ impl Player {
         }
         self.update_buffering(sys);
         let clock = self.clock_ms(sys.uptime_ms());
-        self.pick_frame(clock);
-        self.update_storyboard(clock, sys);
+        if self.background {
+            // Nothing is shown: let the decoder stall on a full frame pool
+            // instead of decoding pictures nobody sees. It catches up at
+            // the next keyframe once the screen is back.
+            if let Some(v) = &self.vout {
+                v.shared.clock_ms.store(clock as i32, Ordering::Relaxed);
+            }
+        } else {
+            self.pick_frame(clock);
+            self.update_storyboard(clock, sys);
+        }
         self.check_end(clock, sys);
     }
 

@@ -29,8 +29,8 @@ const VIDEO_TICK_MS: u32 = 40;
 const MIN_TICK_MS: u32 = 4;
 const AUDIO_TICK_MS: u32 = 100;
 const IDLE_TICK_MS: u32 = 250;
-/// Tick while the screen is locked or off: the queues hold seconds of data.
-const BACKGROUND_TICK_MS: u32 = 100;
+/// Tick while the screen is locked or off: the audio queues hold ~12 s.
+const BACKGROUND_TICK_MS: u32 = 500;
 /// Landscape controls stay visible this long after a tap.
 const OVERLAY_MS: u64 = 4000;
 
@@ -141,6 +141,7 @@ impl PlayerView {
     pub fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
         self.handle_commands(sys);
         let p = self.player.as_mut()?;
+        p.background = true;
         p.tick(sys);
         p.is_active().then_some(BACKGROUND_TICK_MS)
     }
@@ -190,6 +191,7 @@ impl PlayerView {
         self.landscape = sys.orientation() == Orientation::Landscape;
         self.handle_commands(sys);
         if let Some(p) = &mut self.player {
+            p.background = false;
             p.tick(sys);
         }
         for k in &ui.input.keys {
