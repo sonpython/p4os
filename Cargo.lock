@@ -656,6 +656,7 @@ dependencies = [
  "p4os-mem",
  "p4os-net",
  "p4os-sdk",
+ "p4os-tlsf",
  "sha2",
  "smoltcp",
 ]
@@ -699,6 +700,10 @@ dependencies = [
  "p4os-sdk",
  "png",
 ]
+
+[[package]]
+name = "p4os-tlsf"
+version = "0.1.0"
 
 [[package]]
 name = "paste"

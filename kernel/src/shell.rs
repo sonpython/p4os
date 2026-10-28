@@ -104,6 +104,8 @@ fn execute(cmd: &str) {
             let (pused, ptotal) = heap::psram_usage();
             kprintln!("sram: {} / {} bytes used, largest free block {}", used, total, heap::largest_free());
             kprintln!("psram: {} / {} bytes used", pused, ptotal);
+            let (stacks, stack_bytes) = heap::stack_pool_idle();
+            kprintln!("stack pool: {} idle stacks, {} bytes (counted as used)", stacks, stack_bytes);
             let (speak, ppeak) = heap::take_peaks();
             kprintln!("peak since last mem: sram {} psram {}", speak, ppeak);
         }
