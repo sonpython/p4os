@@ -5,8 +5,9 @@ use crate::sync::{Mutex, Semaphore};
 use crate::{clock, console, heap, irq, kprint, kprintln, time};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Room for `wifi save` with a 32-byte SSID and a 63-character password.
-const MAX_LINE: usize = 128;
+/// Room for `wifi save` with a 32-byte SSID and a 63-character password,
+/// and for `config set` with an OAuth client ID.
+const MAX_LINE: usize = 192;
 
 pub fn run(_: usize) {
     let mut line = [0u8; MAX_LINE];
@@ -26,13 +27,23 @@ pub fn run(_: usize) {
                 kprint!("\x08 \x08");
             }
             0x20..=0x7E if len < MAX_LINE => {
+                // Typed credentials are echoed as '*' so they stay out of
+                // serial logs.
+                let echo = if typing_hidden_value(&line[..len]) { b'*' } else { byte };
                 line[len] = byte;
                 len += 1;
-                console::write_bytes(&[byte]);
+                console::write_bytes(&[echo]);
             }
             _ => {}
         }
     }
+}
+
+/// True once `typed` is `config set KEY ` for a key whose value is hidden.
+fn typing_hidden_value(typed: &[u8]) -> bool {
+    let Some(rest) = typed.strip_prefix(b"config set ") else { return false };
+    let Some(space) = rest.iter().position(|&b| b == b' ') else { return false };
+    core::str::from_utf8(&rest[..space]).is_ok_and(p4os_sdk::config::is_hidden)
 }
 
 /// Run a command and return its output instead of printing it.
@@ -46,10 +57,12 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get smpdemo"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi get smpdemo"
         ),
         "flash" => crate::flash::diagnose(),
         "config" | "config list" => config_list(),
+        c if c.starts_with("config set ") => config_set(c["config set ".len()..].trim()),
+        c if c.starts_with("config unset ") => config_unset(c["config unset ".len()..].trim()),
         c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
             Ok(n) => config_stress(n),
             Err(_) => kprintln!("usage: config stress N"),
@@ -455,8 +468,36 @@ fn config_list() {
         kprintln!("config: empty");
     }
     for (k, v) in entries {
-        let shown = if p4os_sdk::config::is_secret(&k) { "[set]" } else { v.as_str() };
+        let shown = if p4os_sdk::config::is_hidden(&k) { "[set]" } else { v.as_str() };
         kprintln!("{} = {}", k, shown);
+    }
+}
+
+/// `config set KEY VALUE`: store a setting. Values of hidden keys
+/// (credentials) are never echoed back.
+fn config_set(args: &str) {
+    let Some((key, value)) = args.split_once(' ') else {
+        kprintln!("usage: config set KEY VALUE");
+        return;
+    };
+    let value = value.trim();
+    if let Err(e) = p4os_sdk::config::check_entry(key, value) {
+        kprintln!("config: {} rejected: {:?}", key, e);
+        return;
+    }
+    match crate::config::set(key, value) {
+        Ok(()) if p4os_sdk::config::is_hidden(key) => kprintln!("{} = [set]", key),
+        Ok(()) => kprintln!("{} = {}", key, value),
+        Err(e) => kprintln!("config: saving {} failed: {:?}", key, e),
+    }
+}
+
+fn config_unset(key: &str) {
+    match crate::config::update(|e| {
+        e.remove(key);
+    }) {
+        Ok(()) => kprintln!("{} removed", key),
+        Err(e) => kprintln!("config: removing {} failed: {:?}", key, e),
     }
 }
 

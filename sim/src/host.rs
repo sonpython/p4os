@@ -112,6 +112,18 @@ impl System for HostSystem {
     fn config_set(&mut self, key: &str, value: &str) {
         self.config.insert(key.into(), value.into());
     }
+
+    fn config_remove(&mut self, key: &str) {
+        self.config.remove(key);
+    }
+}
+
+impl HostSystem {
+    /// Answer requests whose URL contains `pattern` with a canned response
+    /// instead of going to the network (screenshots with fixture data).
+    pub fn mock(&mut self, pattern: &str, status: u16, file: PathBuf) {
+        self.net.mocks.push(Mock { pattern: pattern.into(), status, file });
+    }
 }
 
 pub fn datetime_from_unix(secs: u64) -> DateTime {
@@ -294,10 +306,33 @@ impl Audio for HostAudio {
     }
 }
 
+struct Mock {
+    pattern: String,
+    status: u16,
+    file: PathBuf,
+}
+
+impl Mock {
+    fn respond(&self) -> FetchState {
+        let content_type = match self.file.extension().and_then(|e| e.to_str()) {
+            Some("json") => "application/json; charset=UTF-8",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            _ => "text/plain",
+        };
+        match std::fs::read(&self.file) {
+            Ok(body) => FetchState::Done { status: self.status, content_type: content_type.into(), body },
+            Err(e) => FetchState::Failed(format!("mock {}: {e}", self.file.display())),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HostNet {
     next: FetchId,
     fetches: HashMap<FetchId, Arc<Mutex<FetchState>>>,
+    /// Checked in order; the last matching mock wins so later script
+    /// lines can override earlier ones.
+    mocks: Vec<Mock>,
 }
 
 impl Network for HostNet {
@@ -310,12 +345,20 @@ impl Network for HostNet {
     }
 
     fn fetch(&mut self, url: &str) -> FetchId {
+        self.send(HttpRequest::get(url))
+    }
+
+    fn send(&mut self, req: HttpRequest) -> FetchId {
         self.next += 1;
         let slot = Arc::new(Mutex::new(FetchState::Pending));
         self.fetches.insert(self.next, slot.clone());
-        let url = url.to_string();
+        if let Some(mock) = self.mocks.iter().rev().find(|m| req.url.contains(&m.pattern)) {
+            *slot.lock().unwrap() = mock.respond();
+            return self.next;
+        }
         std::thread::spawn(move || {
-            let result = http_get(&url);
+            let request = http::Request { method: req.method, headers: req.headers, body: req.body };
+            let result = http_request(&req.url, request);
             *slot.lock().unwrap() = result;
         });
         self.next
@@ -326,18 +369,25 @@ impl Network for HostNet {
     }
 }
 
-/// HTTP/1.0 GET over http:// or https://, following redirects.
-fn http_get(url: &str) -> FetchState {
+/// An HTTP/1.0 request over http:// or https://, following redirects.
+fn http_request(url: &str, mut request: http::Request) -> FetchState {
+    if let Err(e) = request.validate() {
+        return FetchState::Failed(e);
+    }
     let mut url = url.to_string();
     let mut redirects = 0;
     loop {
         let response = Url::parse(&url).and_then(|target| {
-            let raw = if target.https { tls_exchange(&target)? } else { plain_exchange(&target)? };
+            let bytes = request.encode(&target);
+            let raw = if target.https { tls_exchange(&target, bytes)? } else { plain_exchange(&target, &bytes)? };
             Ok((target, http::parse_response(&raw)?))
         });
         match response {
             Ok((target, r)) if r.is_redirect() && redirects < http::MAX_REDIRECTS => {
                 url = target.resolve(r.location.as_deref().unwrap_or("/"));
+                if let Ok(next) = Url::parse(&url) {
+                    request.follow_redirect(r.status, &target, &next);
+                }
                 redirects += 1;
             }
             Ok((_, r)) => return FetchState::Done { status: r.status, content_type: r.content_type, body: r.body },
@@ -354,9 +404,9 @@ fn connect(target: &Url) -> Result<TcpStream, String> {
 }
 
 /// Send the request and read the raw response until the server closes.
-fn plain_exchange(target: &Url) -> Result<Vec<u8>, String> {
+fn plain_exchange(target: &Url, request: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = connect(target)?;
-    stream.write_all(&target.request()).map_err(|e| format!("send: {e}"))?;
+    stream.write_all(request).map_err(|e| format!("send: {e}"))?;
     let mut raw = Vec::new();
     match stream.read_to_end(&mut raw) {
         Err(e) if raw.is_empty() => Err(format!("read: {e}")),
@@ -365,13 +415,13 @@ fn plain_exchange(target: &Url) -> Result<Vec<u8>, String> {
 }
 
 /// The same exchange through TLS, verified against the Mozilla roots.
-fn tls_exchange(target: &Url) -> Result<Vec<u8>, String> {
+fn tls_exchange(target: &Url, request: Vec<u8>) -> Result<Vec<u8>, String> {
     static CONFIG: OnceLock<Result<Arc<tls::ClientConfig>, String>> = OnceLock::new();
     let config = CONFIG
         .get_or_init(|| tls::client_config(|| SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())))
         .clone()?;
     let mut stream = connect(target)?;
-    let mut client = TlsClient::new(config, &target.host, target.request())?;
+    let mut client = TlsClient::new(config, &target.host, request)?;
     let mut raw = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
     loop {

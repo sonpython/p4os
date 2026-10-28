@@ -27,9 +27,27 @@ pub const UI_ORIENTATION: &str = "ui.orientation";
 /// Backlight level in whole percent, "5".."100".
 pub const UI_BRIGHTNESS: &str = "ui.brightness";
 
+/// YouTube app: Google OAuth client ("TVs and Limited Input devices").
+pub const YOUTUBE_CLIENT_ID: &str = "youtube.client_id";
+pub const YOUTUBE_CLIENT_SECRET: &str = "youtube.client_secret";
+/// YouTube app: Data API key for browsing while signed out (optional).
+pub const YOUTUBE_API_KEY: &str = "youtube.api_key";
+/// YouTube app: OAuth refresh token, written by the app after sign-in.
+pub const YOUTUBE_REFRESH_TOKEN: &str = "youtube.refresh_token";
+/// YouTube app: two-letter region for the trending chart (default "VN").
+pub const YOUTUBE_REGION: &str = "youtube.region";
+/// YouTube app: quota units spent, "YYYY-MM-DD:units" (Pacific day).
+pub const YOUTUBE_QUOTA: &str = "youtube.quota";
+
 /// Keys whose values are write-only for apps and never printed.
 pub fn is_secret(key: &str) -> bool {
     key == WIFI_PASSWORD
+}
+
+/// Keys whose values are never printed (shell listings, logs). Apps may
+/// still read them, unlike [`is_secret`] keys.
+pub fn is_hidden(key: &str) -> bool {
+    is_secret(key) || matches!(key, YOUTUBE_CLIENT_SECRET | YOUTUBE_API_KEY | YOUTUBE_REFRESH_TOKEN)
 }
 
 pub type Entries = BTreeMap<String, String>;
@@ -297,6 +315,18 @@ mod tests {
         assert_eq!(parse_brightness("0"), None);
         assert_eq!(parse_brightness("101"), None);
         assert_eq!(parse_brightness("x"), None);
+    }
+
+    #[test]
+    fn credentials_are_hidden() {
+        for k in [WIFI_PASSWORD, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN] {
+            assert!(is_hidden(k), "{k}");
+        }
+        assert!(!is_hidden(YOUTUBE_CLIENT_ID));
+        assert!(!is_secret(YOUTUBE_REFRESH_TOKEN), "the app must be able to read its token");
+        for k in [YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN, YOUTUBE_REGION, YOUTUBE_QUOTA] {
+            assert!(check_entry(k, "v").is_ok(), "{k}");
+        }
     }
 
     #[test]

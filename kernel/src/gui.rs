@@ -361,5 +361,13 @@ impl System for KernelSystem {
             kprintln!("config: saving {} failed: {:?}", key, e);
         }
     }
+
+    fn config_remove(&mut self, key: &str) {
+        if let Err(e) = crate::config::update(|e| {
+            e.remove(key);
+        }) {
+            kprintln!("config: removing {} failed: {:?}", key, e);
+        }
+    }
 }
 
