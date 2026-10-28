@@ -1,14 +1,16 @@
 //! `System` implementation backed by the host: a directory stands in for
-//! the SD card, HTTP goes through std::net, audio is paced in real time and
+//! the SD card, HTTP and HTTPS go through std::net and p4os-net, audio is paced in real time and
 //! discarded (the simulator has no sound output).
 
+use p4os_net::http::{self, Url};
+use p4os_net::tls::{self, TlsClient};
 use p4os_sdk::*;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct HostSystem {
@@ -293,7 +295,7 @@ impl Network for HostNet {
         self.fetches.insert(self.next, slot.clone());
         let url = url.to_string();
         std::thread::spawn(move || {
-            let result = http_get(&url, 5);
+            let result = http_get(&url);
             *slot.lock().unwrap() = result;
         });
         self.next
@@ -304,46 +306,76 @@ impl Network for HostNet {
     }
 }
 
-/// Minimal HTTP/1.0 GET over plain TCP, following redirects.
-fn http_get(url: &str, redirects_left: u32) -> FetchState {
-    let Some(rest) = url.strip_prefix("http://") else {
-        return FetchState::Failed("only http:// URLs are supported".into());
-    };
-    let (host_port, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(h, p)| (h, format!("/{p}")));
-    let addr = if host_port.contains(':') { host_port.to_string() } else { format!("{host_port}:80") };
-    let host = host_port.split(':').next().unwrap_or(host_port);
-    let mut stream = match TcpStream::connect(&addr) {
-        Ok(s) => s,
-        Err(e) => return FetchState::Failed(format!("connect {addr}: {e}")),
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: p4os/0.1\r\nAccept: text/html,*/*\r\n\r\n");
-    if let Err(e) = stream.write_all(req.as_bytes()) {
-        return FetchState::Failed(format!("send: {e}"));
+/// HTTP/1.0 GET over http:// or https://, following redirects.
+fn http_get(url: &str) -> FetchState {
+    let mut url = url.to_string();
+    let mut redirects = 0;
+    loop {
+        let response = Url::parse(&url).and_then(|target| {
+            let raw = if target.https { tls_exchange(&target)? } else { plain_exchange(&target)? };
+            Ok((target, http::parse_response(&raw)?))
+        });
+        match response {
+            Ok((target, r)) if r.is_redirect() && redirects < http::MAX_REDIRECTS => {
+                url = target.resolve(r.location.as_deref().unwrap_or("/"));
+                redirects += 1;
+            }
+            Ok((_, r)) => return FetchState::Done { status: r.status, content_type: r.content_type, body: r.body },
+            Err(e) => return FetchState::Failed(e),
+        }
     }
+}
+
+fn connect(target: &Url) -> Result<TcpStream, String> {
+    let addr = format!("{}:{}", target.host, target.port);
+    let stream = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    Ok(stream)
+}
+
+/// Send the request and read the raw response until the server closes.
+fn plain_exchange(target: &Url) -> Result<Vec<u8>, String> {
+    let mut stream = connect(target)?;
+    stream.write_all(&target.request()).map_err(|e| format!("send: {e}"))?;
     let mut raw = Vec::new();
-    if let Err(e) = stream.read_to_end(&mut raw) {
-        if raw.is_empty() {
-            return FetchState::Failed(format!("read: {e}"));
-        }
+    match stream.read_to_end(&mut raw) {
+        Err(e) if raw.is_empty() => Err(format!("read: {e}")),
+        _ => Ok(raw),
     }
-    let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return FetchState::Failed("malformed response".into());
-    };
-    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
-    let body = raw[split + 4..].to_vec();
-    let status: u16 = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let header = |name: &str| {
-        head.lines().find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
-        })
-    };
-    if (300..400).contains(&status) && redirects_left > 0 {
-        if let Some(loc) = header("location") {
-            let next = if loc.starts_with("http") { loc } else { format!("http://{host_port}{loc}") };
-            return http_get(&next, redirects_left - 1);
+}
+
+/// The same exchange through TLS, verified against the Mozilla roots.
+fn tls_exchange(target: &Url) -> Result<Vec<u8>, String> {
+    static CONFIG: OnceLock<Result<Arc<tls::ClientConfig>, String>> = OnceLock::new();
+    let config = CONFIG
+        .get_or_init(|| tls::client_config(|| SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())))
+        .clone()?;
+    let mut stream = connect(target)?;
+    let mut client = TlsClient::new(config, &target.host, target.request())?;
+    let mut raw = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let out = client.pending_output();
+        if !out.is_empty() {
+            stream.write_all(out).map_err(|e| format!("send: {e}"))?;
+            let n = out.len();
+            client.consume_output(n);
         }
+        if client.peer_closed() {
+            break;
+        }
+        let n = stream.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            // Many servers close TCP without close_notify after Connection: close.
+            if client.is_handshaking() {
+                return Err("connection closed during the TLS handshake".into());
+            }
+            break;
+        }
+        client.push_received(&buf[..n]);
+        client.process()?;
+        raw.extend(client.take_plaintext());
     }
-    FetchState::Done { status, content_type: header("content-type").unwrap_or_default(), body }
+    raw.extend(client.take_plaintext());
+    Ok(raw)
 }

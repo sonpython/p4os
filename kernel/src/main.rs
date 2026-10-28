@@ -23,6 +23,7 @@ mod net;
 mod proto;
 mod psram;
 mod regi2c;
+mod rng;
 mod rtc;
 mod sched;
 mod sdmmc;

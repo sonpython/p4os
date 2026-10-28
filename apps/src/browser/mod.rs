@@ -1,4 +1,4 @@
-//! Browser: a text-mode web browser for plain http:// pages.
+//! Browser: a text-mode web browser for http:// and https:// pages.
 //!
 //! Pages are fetched through `System::net`, tokenized by [`html`] and laid
 //! out into styled lines by [`layout`]. Links are tappable, images become
@@ -166,14 +166,17 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
 
 const START_PAGE: &str = r#"<html><head><title>Start page</title></head><body>
 <h1>Browser</h1>
-<p>A small text-mode web browser for p4os. It speaks plain <b>http://</b> only:
-secure <b>https://</b> sites can't be opened because there is no TLS support yet.
-Pages are shown as text, links are underlined and images appear as placeholders.</p>
+<p>A small text-mode web browser for p4os. It opens <b>http://</b> and secure
+<b>https://</b> pages; certificates are checked against the built-in list of trusted
+authorities. Pages are shown as text, links are underlined and images appear as
+placeholders.</p>
 <h2>Sites to try</h2>
 <ul>
 <li><a href="http://info.cern.ch/">info.cern.ch</a> &mdash; the first website, from CERN</li>
 <li><a href="http://info.cern.ch/hypertext/WWW/TheProject.html">The WorldWideWeb project</a> &mdash; the original 1991 pages</li>
-<li><a href="http://example.com/">example.com</a> &mdash; the classic example domain</li>
+<li><a href="https://example.com/">example.com</a> &mdash; the classic example domain</li>
+<li><a href="https://text.npr.org/">text.npr.org</a> &mdash; NPR news in plain text</li>
+<li><a href="https://lite.cnn.com/">lite.cnn.com</a> &mdash; CNN headlines, text only</li>
 <li><a href="http://neverssl.com/">neverssl.com</a> &mdash; a site that never uses HTTPS</li>
 <li><a href="http://68k.news/">68k.news</a> &mdash; news headlines for vintage computers</li>
 <li><a href="http://textfiles.com/">textfiles.com</a> &mdash; an archive of BBS-era text files</li>
@@ -181,7 +184,7 @@ Pages are shown as text, links are underlined and images appear as placeholders.
 </ul>
 <h2>Tips</h2>
 <ul>
-<li>Tap the address bar, type an address and press Enter or <b>Go</b>. The http:// prefix is added for you.</li>
+<li>Tap the address bar, type an address and press Enter or <b>Go</b>. Without a prefix, http:// is assumed; sites that need HTTPS redirect automatically.</li>
 <li>Drag the page, or use the arrow keys, to scroll.</li>
 <li>Back and Forward remember where you were on each page.</li>
 </ul>
@@ -203,7 +206,6 @@ struct Doc {
 }
 
 enum Action {
-    Go(String),
     Reload,
 }
 
@@ -321,23 +323,12 @@ impl Browser {
             return;
         }
         self.url_text = url.clone();
-        if starts_with_ci(&url, "https://") {
-            let http = format!("http://{}", &url[8..]);
-            self.show_notice(
-                "Secure sites aren't supported",
-                format!(
-                    "{} uses HTTPS (encrypted HTTP). This browser has no TLS support, so it can only open \
-                     plain http:// pages. Some sites still offer an http:// version.",
-                    host_of(&url)
-                ),
-                Some(("Try http:// instead".into(), Action::Go(http))),
-            );
-            return;
-        }
-        if !starts_with_ci(&url, "http://") {
+        if !starts_with_ci(&url, "http://") && !starts_with_ci(&url, "https://") {
             self.show_notice(
                 "Can't open this address",
-                format!("\"{url}\" is not a web address this browser understands. Only http:// links can be opened."),
+                format!(
+                    "\"{url}\" is not a web address this browser understands. Only http:// and https:// links can be opened."
+                ),
                 None,
             );
             return;
@@ -353,11 +344,11 @@ impl Browser {
         match sys.net().poll(id) {
             FetchState::Pending => return,
             FetchState::Failed(msg) => {
-                if msg.contains("only http") {
+                if msg.contains("certificate") || msg.contains("TLS") || msg.contains("clock not set") {
                     self.show_notice(
-                        "This site requires HTTPS",
-                        format!("{host} redirected to a secure https:// address, which this browser can't open."),
-                        None,
+                        "Secure connection failed",
+                        format!("{host}: {msg}"),
+                        Some(("Try again".into(), Action::Reload)),
                     );
                 } else {
                     self.show_notice(
@@ -404,7 +395,8 @@ impl Browser {
             return;
         };
         let kind = if matches!(content, Content::Plain(_)) { " · plain text" } else { "" };
-        let info = format!("{host} · {}{kind}", size_text(body.len()));
+        let secure = if starts_with_ci(&url, "https://") { " · secure" } else { "" };
+        let info = format!("{host}{secure} · {}{kind}", size_text(body.len()));
         self.view = View::Doc(Doc { url, content, page: None, laid_w: 0, info });
         self.scroll = Point::default();
     }
@@ -609,7 +601,7 @@ impl Browser {
             self.url_text.clear();
             self.select_all = false;
         }
-        let submitted = ui.text_field(ch.url, &mut self.url_text, "Type an http:// address");
+        let submitted = ui.text_field(ch.url, &mut self.url_text, "Type a web address");
         let focused = ui.state.focus == Some(ch.url);
         if focused && !self.field_was_focused {
             self.select_all = !self.url_text.is_empty();
@@ -697,7 +689,6 @@ impl Browser {
             let bw = (lf.measure(label) + 48).min(text_w);
             if ui.button_primary(Rect::new(card.x + 24, y, bw, 56), label) {
                 nav = Some(match action {
-                    Action::Go(u) => Nav::Go(u.clone()),
                     Action::Reload => Nav::Reload,
                 });
             }

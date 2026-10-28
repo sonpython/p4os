@@ -27,6 +27,8 @@ struct State {
     head: Option<NonNull<FreeBlock>>,
     total: usize,
     used: usize,
+    /// High-water mark of `used` since the last `take_peaks`.
+    peak: usize,
 }
 
 struct Pool(UnsafeCell<State>);
@@ -35,7 +37,7 @@ unsafe impl Sync for Pool {}
 
 impl Pool {
     const fn new() -> Self {
-        Pool(UnsafeCell::new(State { head: None, total: 0, used: 0 }))
+        Pool(UnsafeCell::new(State { head: None, total: 0, used: 0, peak: 0 }))
     }
 }
 
@@ -110,6 +112,20 @@ fn pool_usage(pool: &Pool) -> (usize, usize) {
         let st = &*pool.0.get();
         (st.used, st.total)
     })
+}
+
+/// Peak (SRAM, PSRAM) bytes used since the previous call; restarts the
+/// measurement from the current usage.
+pub fn take_peaks() -> (usize, usize) {
+    let take = |pool: &Pool| {
+        irq::free(|| unsafe {
+            let st = &mut *pool.0.get();
+            let peak = st.peak;
+            st.peak = st.used;
+            peak
+        })
+    };
+    (take(&SRAM), take(&PSRAM))
 }
 
 /// Size of the largest free SRAM block, a quick fragmentation indicator.
@@ -189,6 +205,7 @@ unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
                     insert_free(st, base + size, end - base - size);
                 }
                 st.used += size;
+                st.peak = st.peak.max(st.used);
                 return base as *mut u8;
             }
             prev = cur;

@@ -96,6 +96,8 @@ fn execute(cmd: &str) {
             let (pused, ptotal) = heap::psram_usage();
             kprintln!("sram: {} / {} bytes used, largest free block {}", used, total, heap::largest_free());
             kprintln!("psram: {} / {} bytes used", pused, ptotal);
+            let (speak, ppeak) = heap::take_peaks();
+            kprintln!("peak since last mem: sram {} psram {}", speak, ppeak);
         }
         "demo" => demo(),
         "uptime" => kprintln!("{} ms", time::ticks()),
@@ -287,6 +289,11 @@ fn http_get(url: &str) {
     let start = crate::time::ticks();
     loop {
         match crate::net::poll_fetch(id) {
+            // Requests queue until DHCP is up; do not hang the shell forever.
+            p4os_sdk::FetchState::Pending if crate::time::ticks().wrapping_sub(start) > 60_000 => {
+                kprintln!("fetch still pending after 60 s (is Wi-Fi up?)");
+                return;
+            }
             p4os_sdk::FetchState::Pending => crate::sched::sleep_ms(50),
             p4os_sdk::FetchState::Done { status, content_type, body } => {
                 let preview = alloc::string::String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned();
