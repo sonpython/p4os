@@ -54,6 +54,12 @@ impl Desktop {
         self.lock.is_locked()
     }
 
+    /// True while passcode digits are typed on the lock screen; screenshots
+    /// are refused then.
+    pub fn passcode_typed(&self) -> bool {
+        self.lock.has_typed_digits()
+    }
+
     /// Lock immediately (if a passcode is configured).
     pub fn lock_now(&mut self, sys: &mut dyn System) {
         self.lock.lock_now(sys);

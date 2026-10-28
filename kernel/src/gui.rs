@@ -67,12 +67,19 @@ fn run(_: usize) {
 
         let render_done = systimer::now_ticks();
         blit(&logical, sys.orientation, &mut buffers[0]);
-        display::present(&buffers[0]);
+        display::present_with(&buffers[0], frame_info(sys.orientation, desktop.passcode_typed()));
         buffers.swap(0, 1);
         sys.last_frame_us = ((render_done - started) / systimer::TICKS_PER_US) as u32;
         sys.last_present_us = ((systimer::now_ticks() - render_done) / systimer::TICKS_PER_US) as u32;
         next_frame_at = now + next.unwrap_or(1000) as u64;
     }
+}
+
+/// `display::FRAME_*` flags for a frame, read back by screenshots.
+fn frame_info(o: Orientation, passcode_typed: bool) -> u32 {
+    let landscape = if o == Orientation::Landscape { display::FRAME_LANDSCAPE } else { 0 };
+    let secure = if passcode_typed { display::FRAME_SECURE } else { 0 };
+    landscape | secure
 }
 
 fn now_ms() -> u64 {
