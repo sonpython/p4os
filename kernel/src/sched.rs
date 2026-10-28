@@ -204,6 +204,12 @@ pub fn start() -> ! {
     unreachable!("boot context resumed")
 }
 
+/// Whether the caller is a scheduled thread (not boot code or a handler
+/// running before the core's first switch).
+pub fn in_thread() -> bool {
+    !irq::in_trap() && SCHED.lock().current[irq::hart_id()].is_some()
+}
+
 /// Whether `hart` has entered the scheduler.
 pub fn is_online(hart: usize) -> bool {
     ONLINE[hart].load(Ordering::Acquire)
@@ -228,7 +234,7 @@ pub fn sleep_ms(ms: u32) {
     yield_now();
 }
 
-/// Blocking primitives build on `block_unless` and `wake`. Their own state
+/// Blocking primitives build on `block_unless` and `wake_one`. Their own state
 /// is protected by the scheduler lock, which both run the closure under.
 ///
 /// `block_unless` calls `try_take`. If that fails, `add_waiter(current
@@ -247,24 +253,35 @@ pub fn block_unless(try_take: impl FnOnce() -> bool, add_waiter: impl FnOnce(usi
     false
 }
 
-/// Run `f` under the scheduler lock and make every blocked thread whose id
-/// bit is set in the returned mask ready again. Safe from interrupt handlers.
-pub fn wake(f: impl FnOnce() -> u32) {
+/// Run `f` under the scheduler lock; it updates the primitive and returns
+/// its waiter mask (one bit per thread id). The most important thread in
+/// the mask that is still blocked is made ready and its bit cleared; bits
+/// of threads no longer blocked are dropped. Costs nothing beyond the lock
+/// when there are no waiters. Safe from interrupt handlers.
+pub fn wake_one<'a>(f: impl FnOnce() -> &'a mut u32) {
     let mut guard = SCHED.lock();
     let s = &mut *guard;
     let mask = f();
-    for id in 0..MAX_THREADS {
-        if mask & (1 << id) == 0 {
-            continue;
-        }
-        if let Some(t) = s.threads[id].as_mut() {
-            if t.state == State::Blocked {
-                t.state = State::Ready;
-                let (priority, affinity) = (t.priority, t.affinity);
-                kick(s, priority, affinity);
+    let mut best: Option<(usize, u8)> = None;
+    let mut bits = *mask;
+    while bits != 0 {
+        let id = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        match s.threads.get(id).and_then(Option::as_ref) {
+            Some(t) if t.state == State::Blocked => {
+                if best.is_none_or(|(_, p)| t.priority > p) {
+                    best = Some((id, t.priority));
+                }
             }
+            _ => *mask &= !(1 << id),
         }
     }
+    let Some((id, _)) = best else { return };
+    *mask &= !(1 << id);
+    let t = s.threads[id].as_mut().unwrap();
+    t.state = State::Ready;
+    let (priority, affinity) = (t.priority, t.affinity);
+    kick(s, priority, affinity);
 }
 
 /// Priority of what `hart` runs now, or -1 if it is idle, between threads,
@@ -311,7 +328,15 @@ fn resched(hart: usize) {
 
 /// Consume this core's pending reschedule request.
 pub fn take_resched() -> bool {
-    NEED_RESCHED[irq::hart_id()].swap(false, Ordering::SeqCst)
+    // A plain load first keeps the common "nothing pending" path free of
+    // an atomic read-modify-write. A request landing between the load and
+    // the store is served by the switch the caller is about to do.
+    let flag = &NEED_RESCHED[irq::hart_id()];
+    if !flag.load(Ordering::SeqCst) {
+        return false;
+    }
+    flag.store(false, Ordering::SeqCst);
+    true
 }
 
 /// Share of the last full second core `hart` spent outside its idle thread.
@@ -492,33 +517,46 @@ pub struct ThreadInfo {
 /// Gives up with the holder's hart id if the scheduler lock stays taken
 /// (a core stuck inside the scheduler), so a debug dump cannot hang.
 pub fn snapshot() -> Result<[Option<ThreadInfo>; MAX_THREADS], Option<usize>> {
-    let Some(s) = SCHED.try_lock_for(100_000) else {
-        return Err(SCHED.owner());
-    };
     let mut out = [None; MAX_THREADS];
-    for (i, t) in s.threads.iter().enumerate() {
-        if let Some(t) = t {
-            out[i] = Some(ThreadInfo {
-                id: i,
-                name: t.name,
-                priority: t.priority,
-                state: t.state,
-                run_ticks: t.run_ticks,
-                stack_size: t.stack_size,
-                stack_used: stack_high_water(t),
-                cpu: t.on_cpu,
-                last_cpu: t.last_cpu,
-                affinity: t.affinity,
-            });
+    let mut stacks = [(0usize, 0usize); MAX_THREADS];
+    {
+        let Some(s) = SCHED.try_lock_for(100_000) else {
+            return Err(SCHED.owner());
+        };
+        for (i, t) in s.threads.iter().enumerate() {
+            if let Some(t) = t {
+                stacks[i] = (t.stack_bottom as usize, t.stack_size);
+                out[i] = Some(ThreadInfo {
+                    id: i,
+                    name: t.name,
+                    priority: t.priority,
+                    state: t.state,
+                    run_ticks: t.run_ticks,
+                    stack_size: t.stack_size,
+                    stack_used: 0,
+                    cpu: t.on_cpu,
+                    last_cpu: t.last_cpu,
+                    affinity: t.affinity,
+                });
+            }
+        }
+    }
+    // Scanning tens of KiB of stack takes too long to do with interrupts
+    // masked, so it runs unlocked. A thread reaped meanwhile only makes
+    // the scan read freed (still mapped) heap RAM; it is reported as it
+    // was when the lock was held.
+    for (info, &(bottom, size)) in out.iter_mut().zip(stacks.iter()) {
+        if let Some(info) = info {
+            info.stack_used = stack_high_water(bottom as *const u32, size);
         }
     }
     Ok(out)
 }
 
 /// Bytes of stack ever touched, found by scanning for the fill pattern.
-fn stack_high_water(t: &Thread) -> usize {
-    let words = t.stack_size / 4;
-    let base = t.stack_bottom;
-    let untouched = (1..words).take_while(|&i| unsafe { base.add(i).read() } == STACK_FILL).count();
-    t.stack_size - (untouched + 1) * 4
+fn stack_high_water(bottom: *const u32, size: usize) -> usize {
+    let words = size / 4;
+    let untouched =
+        (1..words).take_while(|&i| unsafe { bottom.add(i).read_volatile() } == STACK_FILL).count();
+    size - (untouched + 1) * 4
 }

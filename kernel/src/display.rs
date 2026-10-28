@@ -112,7 +112,7 @@ static FLIPPED: Semaphore = Semaphore::new(0);
 
 fn field(addr: usize, hi: u32, lo: u32, value: u32) {
     let mask = (((1u64 << (hi - lo + 1)) - 1) as u32) << lo;
-    mmio::write(addr, (mmio::read(addr) & !mask) | ((value << lo) & mask));
+    mmio::modify(addr, mask, value << lo);
 }
 
 fn lli_word(i: usize, v: u32) {

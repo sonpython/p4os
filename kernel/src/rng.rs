@@ -8,9 +8,9 @@
 //! pool and a counter (the pool is ratcheted forward after every request).
 //! It backs `getrandom`, which the RustCrypto provider uses.
 
-use crate::{irq, mmio, systimer};
+use crate::spin::SpinLock;
+use crate::{mmio, systimer};
 use core::arch::asm;
-use core::cell::UnsafeCell;
 use sha2::{Digest, Sha256};
 
 /// LP_SYSTEM_REG_RNG_DATA_REG (DR_REG_LP_SYS_BASE 0x5011_0000 + 0x1A4).
@@ -18,10 +18,8 @@ const RNG_DATA: usize = 0x5011_01A4;
 /// Register samples mixed into the pool per request.
 const SAMPLES: usize = 32;
 
-struct Pool(UnsafeCell<([u8; 32], u64)>);
-unsafe impl Sync for Pool {}
-
-static POOL: Pool = Pool(UnsafeCell::new(([0; 32], 0)));
+/// (pool, output counter), shared by threads on both cores.
+static POOL: SpinLock<([u8; 32], u64)> = SpinLock::new(([0; 32], 0));
 
 fn mcycle() -> u32 {
     let v: u32;
@@ -42,8 +40,9 @@ pub fn fill(out: &mut [u8]) {
     fresh.update(systimer::now_ticks().to_le_bytes());
     let fresh = fresh.finalize();
 
-    let (key, base) = irq::free(|| unsafe {
-        let (pool, counter) = &mut *POOL.0.get();
+    let (key, base) = {
+        let mut guard = POOL.lock();
+        let (pool, counter) = &mut *guard;
         let mut h = Sha256::new();
         h.update(*pool);
         h.update(fresh);
@@ -51,7 +50,7 @@ pub fn fill(out: &mut [u8]) {
         let base = *counter;
         *counter += out.len().div_ceil(32) as u64 + 1;
         (*pool, base)
-    });
+    };
     for (i, chunk) in out.chunks_mut(32).enumerate() {
         let mut h = Sha256::new();
         h.update(key);
@@ -60,13 +59,11 @@ pub fn fill(out: &mut [u8]) {
     }
     // Ratchet the pool so the output just produced cannot be recomputed
     // from a later pool state.
-    irq::free(|| unsafe {
-        let (pool, _) = &mut *POOL.0.get();
-        let mut h = Sha256::new();
-        h.update(*pool);
-        h.update(b"ratchet");
-        pool.copy_from_slice(&h.finalize());
-    });
+    let mut guard = POOL.lock();
+    let mut h = Sha256::new();
+    h.update(guard.0);
+    h.update(b"ratchet");
+    guard.0.copy_from_slice(&h.finalize());
 }
 
 fn getrandom_hook(buf: &mut [u8]) -> Result<(), getrandom::Error> {

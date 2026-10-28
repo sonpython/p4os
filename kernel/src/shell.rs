@@ -3,7 +3,7 @@
 use crate::sched::{self, State};
 use crate::sync::{Mutex, Semaphore};
 use crate::{clock, console, heap, irq, kprint, kprintln, time};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Room for `wifi save` with a 32-byte SSID and a 63-character password.
 const MAX_LINE: usize = 128;
@@ -46,10 +46,14 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config wifi get smpdemo"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get smpdemo"
         ),
         "flash" => crate::flash::diagnose(),
         "config" | "config list" => config_list(),
+        c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
+            Ok(n) => config_stress(n),
+            Err(_) => kprintln!("usage: config stress N"),
+        },
         "wifi" => wifi_status(),
         "wifi forget" => wifi_forget(),
         c if c.starts_with("wifi save ") => wifi_join(c["wifi save ".len()..].trim(), true),
@@ -190,21 +194,92 @@ fn smpdemo() {
     );
 }
 
+const SMP_NAMES: [&str; 2] = ["spin0", "spin1"];
+/// Tick at which the current run started.
+static SMP_START: AtomicU32 = AtomicU32::new(0);
+
 fn smp_run(threads: usize) -> u32 {
-    const NAMES: [&str; 2] = ["spin0", "spin1"];
-    let start = time::ticks();
-    for (i, cores) in SMP_CORES.iter().enumerate().take(threads) {
+    for cores in &SMP_CORES {
         cores.store(0, Ordering::Relaxed);
-        sched::spawn(NAMES[i], SMP_PRIORITY, 4096, smp_worker, i);
     }
+    // Spawned from a thread that outranks the workers, so the first worker
+    // cannot preempt the spawner before the second one exists.
+    sched::spawn("spin-start", SMP_PRIORITY + 1, 4096, smp_launch, threads);
     for _ in 0..threads {
         SMP_DONE.acquire();
     }
-    let ms = time::ticks() - start;
+    let ms = time::ticks() - SMP_START.load(Ordering::Relaxed);
     for (i, cores) in SMP_CORES.iter().enumerate().take(threads) {
-        kprintln!("  {}: ran on core mask {:#b}", NAMES[i], cores.load(Ordering::Relaxed));
+        kprintln!("  {}: ran on core mask {:#b}", SMP_NAMES[i], cores.load(Ordering::Relaxed));
     }
     ms
+}
+
+fn smp_launch(threads: usize) {
+    SMP_START.store(time::ticks(), Ordering::Relaxed);
+    for (i, name) in SMP_NAMES.iter().enumerate().take(threads) {
+        sched::spawn(name, SMP_PRIORITY, 4096, smp_worker, i);
+    }
+}
+
+static BURN_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Like an `smpdemo` worker, but runs until `BURN_STOP` at low priority.
+fn burner(i: usize) {
+    let mut x = 0x1234_5678u32.wrapping_add(i as u32);
+    while !BURN_STOP.load(Ordering::Relaxed) {
+        for _ in 0..0x1000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+        }
+        SMP_CORES[i].fetch_or(1 << irq::hart_id(), Ordering::Relaxed);
+    }
+    core::hint::black_box(x);
+    SMP_DONE.release();
+}
+
+/// Save settings `n` times while two threads keep both cores busy, so the
+/// flash path must park the other core every time. A scratch key is
+/// written and removed; every other entry must survive unchanged.
+fn config_stress(n: u32) {
+    const KEY: &str = "test.stress";
+    let before = crate::config::entries();
+    BURN_STOP.store(false, Ordering::Relaxed);
+    for (i, cores) in SMP_CORES.iter().enumerate() {
+        cores.store(0, Ordering::Relaxed);
+        sched::spawn(["burn0", "burn1"][i], 1, 4096, burner, i);
+    }
+    let start = time::ticks();
+    let mut failed = None;
+    for i in 0..n {
+        let value = alloc::format!("{}", i);
+        if let Err(e) = crate::config::set(KEY, &value) {
+            failed = Some(alloc::format!("save {} failed: {:?}", i, e));
+            break;
+        }
+        if crate::config::get(KEY).as_deref() != Some(value.as_str()) {
+            failed = Some(alloc::format!("save {} read back wrong", i));
+            break;
+        }
+    }
+    let ms = time::ticks() - start;
+    BURN_STOP.store(true, Ordering::Relaxed);
+    SMP_DONE.acquire();
+    SMP_DONE.acquire();
+    let cleanup = crate::config::update(|e| {
+        e.remove(KEY);
+    });
+    let intact = crate::config::entries() == before;
+    kprintln!(
+        "config stress: {} in {} ms, burners on core masks {:#b}/{:#b}, cleanup {:?}, other entries {}",
+        failed.as_deref().unwrap_or("all saves ok"),
+        ms,
+        SMP_CORES[0].load(Ordering::Relaxed),
+        SMP_CORES[1].load(Ordering::Relaxed),
+        cleanup,
+        if intact { "intact" } else { "CHANGED" }
+    );
 }
 
 fn smp_worker(i: usize) {

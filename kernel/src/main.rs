@@ -98,8 +98,10 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::mount() {
         kprintln!("fs: no SD card filesystem ({})", e);
     }
-    time::resync();
     config::init();
+    // After every boot step that runs with interrupts masked (flash reads
+    // in config::init included), so the first tick is not counted late.
+    time::resync();
     irq::enable_global();
 
     time::sleep_ms(1000);
