@@ -43,8 +43,9 @@ pub fn capture(cmd: &str) -> alloc::string::String {
 fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
-        "help" => kprintln!("commands: help uptime clock irq ps mem demo membench lcd hwscan"),
+        "help" => kprintln!("commands: help uptime clock irq ps mem demo membench bench lcd hwscan"),
         "membench" => membench(),
+        "bench" => crate::bench::run(),
         "lcd" => crate::display::diagnose(),
         "hwscan" => hwscan(),
         "sd" => sd_probe(crate::sdmmc::DEFAULT_BUS),

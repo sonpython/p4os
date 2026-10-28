@@ -198,6 +198,13 @@ unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
     })
 }
 
+/// Allocate from internal SRAM only, whatever the size (the global
+/// allocator would send large blocks to PSRAM). Returns null when SRAM has
+/// no fitting block. Free with the global allocator (`alloc::alloc::dealloc`).
+pub fn alloc_sram(layout: Layout) -> *mut u8 {
+    unsafe { pool_alloc(&SRAM, block_size(&layout), layout.align().max(GRANULE)) }
+}
+
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = block_size(&layout);

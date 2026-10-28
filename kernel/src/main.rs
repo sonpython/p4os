@@ -6,6 +6,7 @@ extern crate alloc;
 mod app_desc;
 mod audio;
 mod backlight;
+mod bench;
 mod boot;
 mod c6;
 mod clock;
