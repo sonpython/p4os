@@ -66,7 +66,7 @@ pub enum Error {
 
 fn field(addr: usize, hi: u32, lo: u32, value: u32) {
     let mask = (((1u64 << (hi - lo + 1)) - 1) as u32) << lo;
-    mmio::write(addr, (mmio::read(addr) & !mask) | ((value << lo) & mask));
+    mmio::modify(addr, mask, value << lo);
 }
 
 #[repr(C)]
@@ -250,10 +250,10 @@ fn map(size: usize) {
 
 /// Serialises the cache sync engine, which both cores share: the ROM
 /// helpers program its address/size/control registers in several steps.
-static CACHE_OP: crate::spin::SpinLock<()> = crate::spin::SpinLock::new(());
+pub static CACHE_OP: crate::spin::SpinLock<()> = crate::spin::SpinLock::new(());
 /// Work done per lock hold, so the other core and interrupts never wait
 /// long behind a framebuffer-sized operation.
-const CACHE_OP_CHUNK: usize = 32 * 1024;
+const CACHE_OP_CHUNK: usize = 8 * 1024;
 
 fn rom_cache_op(rom_fn: usize, addr: usize, size: usize) {
     let f: unsafe extern "C" fn(u32, u32, u32) -> i32 = unsafe { core::mem::transmute(rom_fn) };

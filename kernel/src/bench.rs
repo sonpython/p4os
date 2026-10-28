@@ -19,6 +19,11 @@ const RUNS: usize = 5;
 /// Above every system thread, so only interrupts compete with the bench.
 const PRIORITY: u8 = 10;
 const STACK: usize = 8 * 1024;
+/// Every bench thread runs on this core: `mcycle` is per core, so cycle
+/// stamps taken on different cores cannot be subtracted, and the alarm
+/// interrupt is attached to the core that runs `alarm_init`. It also keeps
+/// the results comparable with single-core runs.
+const CORE: Option<usize> = Some(0);
 
 const PINGPONG_ROUNDS: u32 = 10_000;
 const YIELDS: u32 = 10_000;
@@ -84,7 +89,7 @@ fn mb_per_s(bytes: usize, c: u32) -> f32 {
 /// Entry point for the shell: run the suite on a high-priority thread and
 /// wait for it, so lower-priority system threads do not disturb it.
 pub fn run() {
-    sched::spawn("bench", PRIORITY, STACK, runner, 0);
+    sched::spawn_on(CORE, "bench", PRIORITY, STACK, runner, 0);
     RUNNER_DONE.acquire();
 }
 
@@ -149,7 +154,7 @@ fn pong(_: usize) {
 /// Each round trip is two context switches plus one give and one take on
 /// each side; reported per switch.
 fn pingpong() -> f32 {
-    sched::spawn("bench-pong", PRIORITY, STACK, pong, 0);
+    sched::spawn_on(CORE, "bench-pong", PRIORITY, STACK, pong, 0);
     let t0 = cycles();
     for _ in 0..PINGPONG_ROUNDS {
         PING.release();
@@ -169,7 +174,7 @@ fn yielder(_: usize) {
 
 /// Two equal-priority threads yielding to each other; every yield switches.
 fn yield_pair() -> f32 {
-    sched::spawn("bench-yield", PRIORITY, STACK, yielder, 0);
+    sched::spawn_on(CORE, "bench-yield", PRIORITY, STACK, yielder, 0);
     let t0 = cycles();
     for _ in 0..YIELDS {
         sched::yield_now();

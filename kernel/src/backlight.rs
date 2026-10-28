@@ -17,7 +17,7 @@ static LEVEL: AtomicU32 = AtomicU32::new(0);
 pub fn init() {
     let clk = soc::HP_SYS_CLKRST;
     mmio::set_bits(clk + 0x20, 1 << 0); // LEDC APB clock
-    mmio::write(clk + 0x9C, (mmio::read(clk + 0x9C) & !0b11) | (1 << 2)); // XTAL, enabled
+    mmio::modify(clk + 0x9C, 0b111, 1 << 2); // XTAL, enabled
     mmio::set_bits(clk + 0xC4, 1 << 29);
     mmio::clear_bits(clk + 0xC4, 1 << 29);
     mmio::write(LEDC + 0x170, 1 << 31); // LEDC_CONF: clock enable
@@ -28,7 +28,7 @@ pub fn init() {
 
     // Route channel 0 to the pad.
     let pad = soc::IO_MUX + 4 + 4 * PIN as usize;
-    mmio::write(pad, (mmio::read(pad) & !(0x7 << 12)) | (1 << 12));
+    mmio::modify(pad, 0x7 << 12, 1 << 12);
     mmio::write(soc::GPIO + 0x558 + 4 * PIN as usize, SIG_LEDC_CH0);
     mmio::write(soc::GPIO + 0x24, 1 << PIN);
     set(1.0);

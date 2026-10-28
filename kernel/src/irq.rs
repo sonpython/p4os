@@ -110,6 +110,14 @@ pub fn enable_global() {
     unsafe { core::arch::asm!("csrsi mstatus, 0x8") };
 }
 
+/// Whether interrupts are enabled on this core (thread context outside
+/// any critical section).
+pub fn enabled() -> bool {
+    let s: u32;
+    unsafe { core::arch::asm!("csrr {0}, mstatus", out(reg) s) };
+    s & 0x8 != 0
+}
+
 /// Mask interrupts and report whether they were enabled before.
 pub fn disable_global() -> bool {
     let prev: u32;

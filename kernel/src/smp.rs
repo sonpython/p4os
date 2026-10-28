@@ -13,6 +13,11 @@
 //! IPIs use the CPU-from-CPU interrupt sources: core N listens on source
 //! FROM_CPU0 + N, raised by writing 1 to HP_SYS CPU_INT_FROM_CPU_N. The
 //! level stays asserted until the receiver writes 0.
+//!
+//! Flash writes suspend the cache both cores fetch code through, so the
+//! other core is first parked in a loop in internal SRAM
+//! (`with_other_core_parked`), as ESP-IDF does with its IPC "stall other
+//! CPU" call.
 
 use crate::{irq, kprintln, mmio, sched, soc, systimer};
 use core::arch::asm;
@@ -32,7 +37,8 @@ const ROM_SET_APPCPU_BOOT_ADDR: usize = 0x4FC0_00A8;
 
 const CPU_INT_FROM_CPU: usize = soc::HP_SYS + 0x10;
 const CLIC_INT_CONFIG: usize = soc::CLIC;
-const IPI_LINE: usize = 20;
+/// Highest CLIC line, kept clear of the driver lines allocated from 16 up.
+const IPI_LINE: usize = 47;
 const IPI_LEVEL: u32 = 1;
 
 /// Core 0 settings core 1 copies so both cores behave the same: the custom
@@ -72,12 +78,76 @@ pub fn init_ipi() {
     irq::attach(soc::source::FROM_CPU0 + hart, IPI_LINE, IPI_LEVEL, on_ipi);
 }
 
-/// The sender sets the target's reschedule flag before raising the line;
-/// clearing the line before the trap path reads that flag means a request
+/// The sender sets the target's reschedule (or park) flag before raising
+/// the line; clearing the line before reading the flags means a request
 /// arriving in between is either seen now or raises the line again.
 fn on_ipi() {
     mmio::write(CPU_INT_FROM_CPU + irq::hart_id() * 4, 0);
     unsafe { asm!("fence iorw, iorw") };
+    if PARK_REQUEST.load(Ordering::Acquire) != 0 {
+        park();
+    }
+}
+
+/// Non-zero while a core wants the other one parked: the request number.
+static PARK_REQUEST: AtomicU32 = AtomicU32::new(0);
+/// Request number the parked core is spinning for, 0 when not parked.
+static PARKED: AtomicU32 = AtomicU32::new(0);
+static PARK_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Spin until the park request is withdrawn. Runs from internal SRAM in
+/// trap context (interrupt stack in SRAM, interrupts masked) and touches
+/// only flags in `.bss`, so nothing is fetched through the flash or PSRAM
+/// cache meanwhile. Re-check the disassembly
+/// (`objdump -d --section=.sram_text`) after changing it.
+#[unsafe(link_section = ".sram_text")]
+#[inline(never)]
+fn park() {
+    let id = PARK_REQUEST.load(Ordering::Acquire);
+    if id == 0 {
+        return;
+    }
+    PARKED.store(id, Ordering::Release);
+    while PARK_REQUEST.load(Ordering::Acquire) == id {}
+    PARKED.store(0, Ordering::Release);
+}
+
+/// The other core did not reach its parking loop in time.
+#[derive(Debug)]
+pub struct OtherCoreBusy;
+
+/// Run `f` with interrupts masked on this core while the other core (if
+/// running) spins in SRAM, so `f` may suspend the flash/PSRAM cache.
+/// `f` itself must not touch flash or PSRAM once it has done so.
+pub fn with_other_core_parked<R>(f: impl FnOnce() -> R) -> Result<R, OtherCoreBusy> {
+    let irq_was_enabled = irq::disable_global();
+    let other = 1 - irq::hart_id();
+    let park_other = sched::is_online(other);
+    // Numbered so a late acknowledgement of an abandoned request is never
+    // mistaken for the current one.
+    let id = PARK_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
+    if park_other {
+        PARK_REQUEST.store(id, Ordering::SeqCst);
+        send_ipi(other);
+        // The other core takes the IPI as soon as it leaves any critical
+        // section; spinlock holders never wait on this core here.
+        if !wait_until(500_000, || PARKED.load(Ordering::Acquire) == id) {
+            PARK_REQUEST.store(0, Ordering::Release);
+            if irq_was_enabled {
+                irq::enable_global();
+            }
+            return Err(OtherCoreBusy);
+        }
+    }
+    let r = f();
+    if park_other {
+        PARK_REQUEST.store(0, Ordering::Release);
+        while PARKED.load(Ordering::Acquire) == id {}
+    }
+    if irq_was_enabled {
+        irq::enable_global();
+    }
+    Ok(r)
 }
 
 /// Interrupt core `hart`, which reschedules on the way out of the trap.

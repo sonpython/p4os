@@ -1,7 +1,7 @@
 //! Kernel console over the on-chip USB-Serial-JTAG controller.
 
 use crate::spin::SpinLock;
-use crate::sync::Semaphore;
+use crate::sync::{Mutex, Semaphore};
 use crate::{irq, mmio, soc};
 use core::cell::UnsafeCell;
 use core::fmt;
@@ -21,7 +21,8 @@ const LINE: usize = 17;
 const CTRL_T: u8 = 0x14;
 const LEVEL: u32 = 2;
 
-/// Single-producer (interrupt) single-consumer (kernel) receive ring.
+/// Receive ring: one producer (the interrupt handler) and possibly several
+/// consumers (the shell and the GUI, which may run on different cores).
 struct RxRing {
     buf: UnsafeCell<[u8; 256]>,
     head: AtomicUsize,
@@ -73,13 +74,19 @@ pub fn read_byte_blocking() -> u8 {
 }
 
 pub fn read_byte() -> Option<u8> {
-    let tail = RX.tail.load(Ordering::Relaxed);
-    if tail == RX.head.load(Ordering::Acquire) {
-        return None;
+    loop {
+        let tail = RX.tail.load(Ordering::Acquire);
+        if tail == RX.head.load(Ordering::Acquire) {
+            return None;
+        }
+        // The producer does not reuse the slot before `tail` moves past it,
+        // so reading first and then claiming it is safe; a consumer that
+        // loses the race simply retries.
+        let byte = unsafe { (*RX.buf.get())[tail] };
+        if RX.tail.compare_exchange(tail, (tail + 1) % 256, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            return Some(byte);
+        }
     }
-    let byte = unsafe { (*RX.buf.get())[tail] };
-    RX.tail.store((tail + 1) % 256, Ordering::Release);
-    Some(byte)
 }
 
 /// Spin budget per byte. When no host has the port open the FIFO never
@@ -87,8 +94,8 @@ pub fn read_byte() -> Option<u8> {
 const FIFO_TIMEOUT: u32 = 50_000;
 
 /// Set after a timeout: until the FIFO drains again, output is dropped
-/// without spinning, so printing (done with interrupts masked) stays cheap
-/// when nobody listens.
+/// without spinning, so printing stays cheap when nobody listens (some
+/// callers print with interrupts masked).
 static HOST_GONE: AtomicBool = AtomicBool::new(false);
 
 fn write_byte(byte: u8) -> bool {
@@ -121,30 +128,40 @@ pub fn write_bytes(bytes: &[u8]) {
 pub struct Console;
 
 /// When set, kernel output is collected here instead of going to USB (used
-/// to show shell command output inside the Terminal app). Also serialises
-/// output from the two cores, so each `write_str` lands in one piece.
-static OUTPUT: SpinLock<Option<alloc::string::String>> = SpinLock::new(None);
+/// to show shell command output inside the Terminal app).
+static CAPTURE: SpinLock<Option<alloc::string::String>> = SpinLock::new(None);
+
+/// Serialises USB output from threads on both cores, so each `write_str`
+/// lands in one piece. A sleeping lock, because waiting for the host to
+/// drain the FIFO can take a USB frame (~1 ms), far too long to spend with
+/// interrupts masked.
+static OUTPUT: Mutex<()> = Mutex::new(());
 
 pub fn capture_start() {
-    *OUTPUT.lock() = Some(alloc::string::String::new());
+    *CAPTURE.lock() = Some(alloc::string::String::new());
 }
 
 pub fn capture_end() -> alloc::string::String {
-    OUTPUT.lock().take().unwrap_or_default()
+    CAPTURE.lock().take().unwrap_or_default()
 }
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // An exception raised while this core is printing must still be
-        // able to report itself, so print unlocked in that case.
-        if OUTPUT.owner() == Some(irq::hart_id()) {
-            write_bytes(s.as_bytes());
-            return Ok(());
+        // An exception raised while this core holds the capture lock must
+        // still be able to report itself.
+        if CAPTURE.owner() != Some(irq::hart_id()) {
+            if let Some(buf) = &mut *CAPTURE.lock() {
+                buf.push_str(s);
+                return Ok(());
+            }
         }
-        let mut out = OUTPUT.lock();
-        match &mut *out {
-            Some(buf) => buf.push_str(s),
-            None => write_bytes(s.as_bytes()),
+        // Interrupt handlers, spinlock holders and boot code cannot block:
+        // they print directly and may interleave with a thread's output.
+        if irq::enabled() && crate::sched::in_thread() {
+            let _out = OUTPUT.lock();
+            write_bytes(s.as_bytes());
+        } else {
+            write_bytes(s.as_bytes());
         }
         Ok(())
     }

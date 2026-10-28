@@ -68,7 +68,7 @@ fn ring_buf(i: usize) -> usize {
 
 fn field(addr: usize, hi: u32, lo: u32, value: u32) {
     let mask = (((1u64 << (hi - lo + 1)) - 1) as u32) << lo;
-    mmio::write(addr, (mmio::read(addr) & !mask) | ((value << lo) & mask));
+    mmio::modify(addr, mask, value << lo);
 }
 
 fn codec_write(reg: u8, val: u8) {
@@ -168,7 +168,7 @@ fn set_rate(rate: u32) {
 
 fn route(pin: u32, signal: u32) {
     let pad = soc::IO_MUX + 4 + 4 * pin as usize;
-    mmio::write(pad, (mmio::read(pad) & !(0x7 << 12)) | (1 << 12) | (2 << 10));
+    mmio::modify(pad, (0x7 << 12) | (2 << 10), (1 << 12) | (2 << 10));
     mmio::write(soc::GPIO + 0x558 + 4 * pin as usize, signal);
     mmio::write(soc::GPIO + 0x24, 1 << pin);
 }

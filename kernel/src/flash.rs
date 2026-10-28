@@ -9,7 +9,9 @@
 //! (`esp_cache_suspend_ext_mem_cache`): write back the L1 data cache,
 //! `Cache_Suspend_L2_Cache`, flash command, `Cache_Resume_L2_Cache`.
 //! Data crosses the boundary through a bounce buffer in SRAM `.bss`, and
-//! the calling thread's stack must be in internal SRAM too.
+//! the calling thread's stack must be in internal SRAM too. The other core
+//! fetches through the same cache, so it is parked in SRAM for the
+//! duration (`smp::with_other_core_parked`).
 //!
 //! The flash commands are the ROM's legacy SPI flash driver
 //! (`esp_rom_spiflash_*`), configured for this chip by the 2nd-stage
@@ -42,6 +44,8 @@ pub enum Error {
     StackNotInSram,
     /// The ROM flash driver state left by the bootloader looks wrong.
     RomNotReady,
+    /// The other core could not be parked, so the cache stayed in use.
+    OtherCoreBusy,
     /// `esp_rom_spiflash_result_t`: 1 = error, 2 = timeout.
     Rom(i32),
 }
@@ -139,7 +143,10 @@ fn run(op: u32, addr: u32, buf: &mut [u32; SECTOR as usize / 4], len: u32) -> Re
         return Err(Error::StackNotInSram);
     }
     rom_ready()?;
-    match unsafe { rom_op(op, addr, buf.as_mut_ptr(), len) } {
+    let ptr = buf.as_mut_ptr();
+    let rc = crate::smp::with_other_core_parked(|| unsafe { rom_op(op, addr, ptr, len) })
+        .map_err(|_| Error::OtherCoreBusy)?;
+    match rc {
         0 => Ok(()),
         e => Err(Error::Rom(e)),
     }
@@ -221,12 +228,16 @@ fn words_as_bytes_mut(w: &mut [u32; SECTOR as usize / 4]) -> &mut [u8; SECTOR as
     unsafe { &mut *(w as *mut _ as *mut [u8; SECTOR as usize]) }
 }
 
+/// Serialises the MMU index/content register pair between the cores.
+static MMU: crate::spin::SpinLock<()> = crate::spin::SpinLock::new(());
+
 /// Flash MMU entry `i`: the physical page it maps, if valid.
 fn mmu_entry(i: u32) -> Option<u32> {
-    let v = crate::irq::free(|| {
+    let v = {
+        let _mmu = MMU.lock();
         crate::mmio::write(MMU_ITEM_INDEX, i);
         crate::mmio::read(MMU_ITEM_CONTENT)
-    });
+    };
     (v & MMU_VALID != 0).then_some(v & MMU_PAGE_MASK)
 }
 
@@ -243,6 +254,8 @@ fn invalidate_mapped(addr: u32, len: u32) {
             let invalidate: unsafe extern "C" fn(u32, u32, u32) -> i32 =
                 unsafe { core::mem::transmute(ROM_CACHE_INVALIDATE_ADDR) };
             let map = CACHE_MAP_L1_ICACHE_MASK | CACHE_MAP_L1_DCACHE | CACHE_MAP_L2_CACHE;
+            // The cache sync engine is shared with psram.rs and both cores.
+            let _sync = crate::psram::CACHE_OP.lock();
             unsafe { invalidate(map, vaddr, e - s) };
         }
     }

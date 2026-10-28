@@ -4,13 +4,13 @@ use crate::sched;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 
-/// Counting semaphore. Waiters are kept as a bitmask of thread ids and all
-/// of them retry on release, which is simple and fair enough for a small
-/// fixed thread table.
+/// Counting semaphore. Waiters are kept as a bitmask of thread ids; each
+/// release wakes the most important waiter only, which then retries (and
+/// re-registers if another thread took the count first).
 ///
 /// `count` and `waiters` are only touched inside `sched::block_unless` and
-/// `sched::wake`, i.e. under the scheduler lock, which serialises both cores
-/// and interrupt handlers and makes "check, then block" atomic.
+/// `sched::wake_one`, i.e. under the scheduler lock, which serialises both
+/// cores and interrupt handlers and makes "check, then block" atomic.
 pub struct Semaphore {
     count: UnsafeCell<u32>,
     waiters: UnsafeCell<u32>,
@@ -46,9 +46,9 @@ impl Semaphore {
 
     /// Safe to call from interrupt handlers.
     pub fn release(&self) {
-        sched::wake(|| unsafe {
+        sched::wake_one(|| unsafe {
             *self.count.get() += 1;
-            core::mem::take(&mut *self.waiters.get())
+            &mut *self.waiters.get()
         });
     }
 }
