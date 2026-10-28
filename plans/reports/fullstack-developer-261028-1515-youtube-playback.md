@@ -1,5 +1,23 @@
 # On-device YouTube playback (ytplay): implementation report
 
+## Update 2: board back online, main 55e7a43 merged
+
+- **Audio-only playback of 5-EBS0tyJyc works on the speaker.** The camera microphone measured RMS 3714 while it played, against 101 in silence (37x) and 22 while paused.
+- Board run: `yt play 5-EBS0tyJyc audio`, CPU 33%/81% at start and 57%/19% after; Opus at 5.7 ms per packet under load; 1 underrun (the start-up one).
+- `yt bench-opus` on the board against ffmpeg's decode: SNR 41.8 dB, max diff 1661. This is the same as the host, so the board decodes like the Pi. Speed: 2.5 ms per packet, 12.5% of one core.
+- **The lock screen is on, with a passcode I do not have.** The board boots locked, so every run so far was in background mode.
+  - Audio keeps playing under the lock in both audio-only and video mode (RMS 3866 with video mode locked).
+  - Video pictures are skipped while locked and the decoder stalls: CPU 23%/4%.
+  - **Not measured yet:** 144p fps on screen, and the YouTube app's Play button on the board. Both need the screen unlocked. I asked the coordinator for the passcode or approval for `lock reset`.
+- **API.** `Network::request` is gone. ytplay uses main's `Network::send` and `cancel`. `HttpRequest` gained `post()` and `range()`. A request may now set its own `User-Agent`; InnerTube expects the client's.
+- **YouTube app.** Play opens the on-device player (`apps/src/youtube/player.rs` `OnDevice`). The QR fallback stays for ids ytplay cannot parse.
+- **New hooks.**
+  - `App::background`: the desktop calls it while locked, and gui.rs while the screen is off.
+  - `App::keep_awake`: video stops the screen from dimming.
+  - The portrait player repaints only the picture between most frames. The YouTube app no longer clears the player's area.
+- **Stack use under the hardware stack guard:** `ytaudio` 74 KB of 128 KB, `ytvideo` 25 KB of 64 KB, `ytsheet` 47 KB of 96 KB. `crash` shows one old report, from the shell thread 31 s after an earlier boot, the same in every session; no new crash.
+- **SRAM.** Baseline 212 KB; it fills to 412 of 413 KB during playback, and allocations then spill to PSRAM. The cause is rusty_h264's per-frame buffers at 144p (each plane is under 64 KB, so the heap puts it in SRAM; the decoder alone peaked at +223 KB). A real fix needs a kernel heap hook ("this thread prefers PSRAM"); I have not added one, since the heap and scheduler are owned elsewhere.
+
 Date: 2026-10-28. Branch: worktree `agent-a2cecd7ff2f732f45`, merged with main 13c2682 (TLSF heap, lock screen). Not pushed.
 
 ## Outcome
