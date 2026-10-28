@@ -164,6 +164,11 @@ impl Lock {
         self.locked
     }
 
+    /// Locked with at least one passcode digit typed (or being checked).
+    pub fn has_typed_digits(&self) -> bool {
+        self.locked && !self.entry.is_empty()
+    }
+
     /// Lock now if a passcode is configured.
     pub fn lock_now<E: Env + ?Sized>(&mut self, env: &mut E) {
         if !is_configured(env) {
@@ -354,6 +359,21 @@ pub(crate) mod tests {
         }
         assert_eq!(AutoLock::parse(None), AutoLock::ScreenOff);
         assert_eq!(AutoLock::parse(Some("soon")), AutoLock::ScreenOff);
+    }
+
+    #[test]
+    fn typed_digits_are_reported_until_submitted() {
+        let mut env = configured("1234");
+        let mut lock = Lock::default();
+        lock.check(&idle(), &mut env);
+        assert!(!lock.has_typed_digits());
+        lock.entry.push(b'1');
+        assert!(lock.has_typed_digits());
+        lock.entry.push(b'2');
+        lock.submit(&mut env);
+        assert!(!lock.has_typed_digits(), "a wrong attempt clears the entry");
+        type_pin(&mut lock, &mut env, "1234");
+        assert!(!lock.is_locked() && !lock.has_typed_digits());
     }
 
     #[test]

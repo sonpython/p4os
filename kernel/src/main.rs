@@ -36,6 +36,7 @@ mod regi2c;
 mod rng;
 mod rtc;
 mod sched;
+mod screenshot;
 mod sdmmc;
 mod shell;
 mod smp;
@@ -126,6 +127,7 @@ extern "C" fn kmain() -> ! {
     wdt::start_supervisor();
     audio::init();
     gui::start();
+    screenshot::start();
     smp::start_core1();
     wifi_auto::start_from_config();
     sched::start()

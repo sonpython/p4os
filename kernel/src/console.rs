@@ -139,6 +139,46 @@ pub fn write_bytes(bytes: &[u8]) {
     mmio::write(EP1_CONF, WR_DONE);
 }
 
+/// Exclusive use of the USB port for a binary transfer, from
+/// [`binary_transfer`]. Bytes go out untranslated (no CR before LF).
+pub struct BinaryWriter {
+    /// Give up when the FIFO has not drained for this long.
+    stall_ticks: u64,
+}
+
+/// A transfer gave up: the host stopped reading.
+#[derive(Debug)]
+pub struct Stalled;
+
+impl BinaryWriter {
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), Stalled> {
+        let mut last_progress = crate::systimer::now_ticks();
+        for &b in bytes {
+            while mmio::read(EP1_CONF) & IN_EP_DATA_FREE == 0 {
+                if crate::systimer::now_ticks() - last_progress > self.stall_ticks {
+                    HOST_GONE.store(true, Ordering::Relaxed);
+                    return Err(Stalled);
+                }
+            }
+            mmio::write(EP1, b as u32);
+            last_progress = crate::systimer::now_ticks();
+        }
+        HOST_GONE.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Run `f` with the USB port to itself. Other threads' output waits until
+/// it returns (it must not print). Interrupt handlers and spinlock holders
+/// still print directly, so the stream needs its own framing and checksum.
+pub fn binary_transfer<R>(stall_ms: u32, f: impl FnOnce(&mut BinaryWriter) -> R) -> R {
+    let _out = OUTPUT.lock();
+    let mut w = BinaryWriter { stall_ticks: stall_ms as u64 * 1000 * crate::systimer::TICKS_PER_US };
+    let r = f(&mut w);
+    mmio::write(EP1_CONF, WR_DONE);
+    r
+}
+
 pub struct Console;
 
 /// When set, kernel output is collected here instead of going to USB (used

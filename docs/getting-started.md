@@ -19,7 +19,8 @@ Muốn viết app (app tích hợp hoặc app user cách ly), xem [app-developme
 | Reset board và xem console | `python3 scripts/monitor.py [giây]` |
 | Giữ quyền dùng board riêng khi nhiều tiến trình chạy song song | `scripts/board-lock.sh <lệnh>` |
 | Reset, gửi lệnh shell rồi in phản hồi | `python3 scripts/shell-session.py ps mem demo` |
-| Chạy test trên máy host (gồm test của allocator TLSF) | `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-tlsf --target aarch64-unknown-linux-gnu` |
+| Chạy test trên máy host (gồm test của allocator TLSF và bộ mã hoá ảnh chụp màn hình) | `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-tlsf -p p4os-media --target aarch64-unknown-linux-gnu` |
+| Test Python cho giao thức ảnh chụp màn hình | `python3 -m unittest discover -s scripts -p 'test_*.py'` |
 
 Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`).
 
@@ -36,7 +37,32 @@ Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`)
 
 Bố cục bộ nhớ nằm trong `kernel/link.x`. Bootloader bắt buộc có đúng hai segment flash, và segment 0 phải bắt đầu bằng `esp_app_desc_t`.
 
+## Chụp màn hình ngay trên board
+
+Cách kiểm tra giao diện mặc định là lấy thẳng framebuffer của OS, không cần camera. Ảnh luôn đúng từng pixel và theo hướng màn hình người dùng đang thấy (dọc 480×800, ngang 800×480).
+
+| Việc | Lệnh |
+|---|---|
+| Chụp qua serial, lưu PNG trên máy host | `python3 scripts/screenshot.py -o out.png` |
+| Chụp không nén (chậm hơn, để đối chiếu) | `python3 scripts/screenshot.py --mode raw -o out.png` |
+| Chụp rồi so với ảnh mẫu: lệch quá ngưỡng thì thoát mã khác 0 | `python3 scripts/screenshot.py -o now.png --expect ref.png --tolerance 8 --max-diff 0.5` |
+| So hai ảnh có sẵn, không cần board | `python3 scripts/screenshot.py --input a.png --expect b.png` |
+| Chạm giả lập rồi chụp (thử trên board trước, hỏng thì dùng camera, có in nguồn ảnh) | `python3 scripts/board-ui.py "tap 80 132" "shot calculator"` |
+
+- Lệnh shell: `screenshot` hoặc `screenshot fast` (nén RLE không mất dữ liệu), `screenshot raw` (RGB565 thô), `screenshot sd [TÊN]` (lưu PNG vào `/sd/Pictures/Screenshots/`, mặc định đặt tên theo giờ). Nhấn nút **BOOT** (GPIO35) cũng lưu một ảnh vào thẻ SD, màn hình nháy xám một lần để báo đã chụp.
+- `screenshot.py` mở cổng mà **không đổi DTR/RTS** nên không reset chip. Nó tự lấy khoá board (`scripts/board-lock.sh`), trừ khi biến `P4OS_BOARD_LOCKED=1` cho biết tiến trình gọi đã giữ khoá (`board-lock.sh` tự đặt biến này). Vì vậy hãy gọi nó bên trong `board-lock.sh` khi dùng trong script, nếu không `flock` sẽ chờ chính nó. Lỗi khung hay CRC thì thử lại một lần, vẫn hỏng thì thoát với mã 1.
+- `--tolerance` là độ lệch cho phép trên từng kênh màu (0–255). `--max-diff` là phần trăm pixel được phép lệch (mặc định 0).
+- Giao thức: dấu bắt đầu `ESC[P4SHOT`, header 16 byte (rộng, cao, định dạng, kiểu nén, độ dài), dữ liệu, CRC-32, dấu kết thúc `ESC[P4END]`. Chi tiết nằm ở `media/src/shot.rs`. Trong lúc truyền, log của các thread khác phải chờ. Log từ ngắt vẫn có thể chen vào, khi đó CRC sẽ sai và host tự chụp lại.
+- Đo trên board: chép framebuffer mất 23 ms. Ở chế độ `fast`, một màn hình giao diện nén còn 15–29 KB, cả lần chụp trọn vẹn tính từ host mất 0,2–0,3 s. Ở chế độ `raw`, 768 KB truyền mất khoảng 2,5 s (USB-Serial-JTAG đạt khoảng 330 KB/s). `screenshot sd` tạo PNG khoảng 1,15 MB (không nén) và ghi vào thẻ mất khoảng 3,6 s.
+- Ảnh được chép khi đang giữ khoá lật trang của màn hình, nên không bao giờ bị xé hình. GUI chỉ phải chờ vài chục ms.
+- Chụp được ở mọi trạng thái màn hình (sáng, giảm sáng, tắt). Khi panel đang ngủ, ảnh là khung hình cuối cùng GUI đã vẽ.
+- **Không chụp khi đang nhập mã**: nếu màn hình khoá đã có chữ số được gõ, lệnh trả về `screenshot: refused while a passcode is being typed`.
+- Chưa dùng bộ mã hoá JPEG phần cứng: driver phức tạp và JPEG làm mất dữ liệu. RLE thì đủ nhanh và giữ nguyên từng pixel.
+- Camera vẫn là cách duy nhất để xác nhận panel thật sự sáng (đèn nền, khởi tạo panel, màn hình đen). Ảnh chụp trên board chỉ cho biết OS đã vẽ gì.
+
 ## Kiểm tra màn hình bằng camera
+
+Chỉ dùng camera khi chụp trên board thất bại, hoặc khi cần xem panel vật lý.
 
 Có một camera Imou nhìn thẳng vào màn hình, dùng được qua `scripts/cam.py`. Mật khẩu RTSP lấy từ `~/.config/p4os/imou` (quyền 600). Địa chỉ camera mặc định là `192.168.88.7`, đổi được bằng `P4OS_CAM`.
 
@@ -45,7 +71,6 @@ Có một camera Imou nhìn thẳng vào màn hình, dùng được qua `scripts
 | Tìm khung màn hình (nháy xám/đen), lưu vào `scripts/cam-roi.json` | `python3 scripts/cam.py calibrate` |
 | Tô một màu và xác nhận camera thấy đúng màu đó | `python3 scripts/cam.py check 400000` |
 | Chụp vùng màn hình, đứng chiều, tự giảm đèn nền xuống 3% khi chụp | `python3 scripts/cam.py shot out.png` |
-| Chạm giả lập rồi chụp | `python3 scripts/board-ui.py "tap 80 132" "shot calculator"` |
 | Chỉnh ảnh camera qua ONVIF (độ sáng, tương phản) | `python3 scripts/cam_onvif.py get` / `set Brightness=35` |
 | Kiểm tra loa: phát âm thử và nghe bằng micro của camera | `python3 scripts/cam_audio.py 1000` |
 | Lưu mạng Wi-Fi trong `~/.config/p4os/wifi` vào board bằng `wifi save` rồi kết nối (mật khẩu được che trong mọi output) | `python3 scripts/wifi-connect.py` |
@@ -56,7 +81,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `power` (chế độ năng lượng, xem mục Quản lý năng lượng), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `crash` (báo cáo lỗi lần trước, xem "Khôi phục khi lỗi"), `dl URL /sd/ĐƯỜNG_DẪN` (tải file về thẻ SD), `play /sd/ĐƯỜNG_DẪN` / `stop` (phát/dừng MP3 hoặc WAV). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `power` (chế độ năng lượng, xem mục Quản lý năng lượng), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `screenshot [fast|raw]` / `screenshot sd [TÊN]` (chụp màn hình, xem mục Chụp màn hình ngay trên board), `crash` (báo cáo lỗi lần trước, xem "Khôi phục khi lỗi"), `dl URL /sd/ĐƯỜNG_DẪN` (tải file về thẻ SD), `play /sd/ĐƯỜNG_DẪN` / `stop` (phát/dừng MP3 hoặc WAV). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 

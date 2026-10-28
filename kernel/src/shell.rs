@@ -60,7 +60,7 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get dl play stop power smpdemo apps run pmp crash"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get dl play stop power smpdemo apps run pmp crash screenshot"
         ),
         "flash" => crate::flash::diagnose(),
         c if c == "power" || c.starts_with("power ") => crate::power::command(&c["power".len()..]),
@@ -75,6 +75,7 @@ fn execute(cmd: &str, serial: bool) {
             Ok(n) => config_stress(n),
             Err(_) => kprintln!("usage: config stress N"),
         },
+        c if c == "screenshot" || c.starts_with("screenshot ") => crate::screenshot::command(c[10..].trim(), serial),
         "lock" => lock_status(),
         "lock now" => crate::gui::request_lock(),
         "lock bench" => lock_bench(),
