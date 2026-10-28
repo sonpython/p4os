@@ -2,6 +2,7 @@
 //! the test advances, and per-owner heap counters the test can set.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -74,6 +75,7 @@ pub struct TestSys {
     /// Free heap reported by `stats` (SRAM, PSRAM); 0 = unknown.
     pub free: (usize, usize),
     pub log: Vec<String>,
+    pub config: BTreeMap<String, String>,
 }
 
 impl TestSys {
@@ -118,6 +120,12 @@ impl System for TestSys {
         String::new()
     }
     fn launch(&mut self, _app_id: &str) {}
+    fn config_get(&self, key: &str) -> Option<String> {
+        self.config.get(key).cloned()
+    }
+    fn config_set(&mut self, key: &str, value: &str) {
+        self.config.insert(key.into(), value.into());
+    }
     fn log(&mut self, msg: &str) {
         self.log.push(msg.into());
     }

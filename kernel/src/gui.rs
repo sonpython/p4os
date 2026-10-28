@@ -43,6 +43,10 @@ fn run(_: usize) {
             next_frame_at = 0;
             continue;
         }
+        if LOCK_REQUEST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            desktop.lock_now(&mut sys);
+            next_frame_at = 0;
+        }
         let had_input = poll_input(&mut input) | poll_touch(&mut input, sys.orientation);
         let now = now_ms();
         sys.save_brightness_if_settled(now);
@@ -102,6 +106,13 @@ fn blit(src: &[Color], o: Orientation, fb: &mut Framebuffer) {
             }
         }
     }
+}
+
+/// Set by the shell's `lock now`; the GUI thread locks on its next pass.
+static LOCK_REQUEST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn request_lock() {
+    LOCK_REQUEST.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// A tap requested from the shell (`tap X Y`, logical coordinates), used
@@ -360,6 +371,11 @@ impl System for KernelSystem {
         if let Err(e) = crate::config::set(key, value) {
             kprintln!("config: saving {} failed: {:?}", key, e);
         }
+    }
+
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        crate::rng::fill(buf);
+        true
     }
 }
 

@@ -11,6 +11,7 @@ pub mod wm;
 #[cfg(test)]
 pub(crate) mod testsys;
 pub mod icons;
+pub mod lock;
 
 pub mod calculator;
 pub mod files;

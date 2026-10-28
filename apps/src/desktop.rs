@@ -14,6 +14,7 @@ use crate::wm::policy::{self, AppRecord, CpuMeter, HangWatch, KillReason, Limits
 use crate::wm::switcher::{self, Card, Switcher};
 use crate::wm::thumb::{self, Thumbnail};
 use crate::wm::feedback;
+use crate::lock::{self, Lock};
 use crate::APPS;
 use alloc::boxed::Box;
 use alloc::format;
@@ -124,6 +125,7 @@ pub struct Desktop {
     last_check: u64,
     usage: Rc<Vec<AppUsage>>,
     perf: Perf,
+    lock: Lock,
 }
 
 impl Default for Desktop {
@@ -200,7 +202,29 @@ impl Desktop {
             last_check: 0,
             usage: Rc::new(Vec::new()),
             perf: Perf::default(),
+            lock: Lock::default(),
         }
+    }
+
+    /// True while the lock screen is up: nothing else is drawn and no input
+    /// reaches apps or system gestures.
+    pub fn is_locked(&self) -> bool {
+        self.lock.is_locked()
+    }
+
+    /// Lock immediately (if a passcode is configured).
+    pub fn lock_now(&mut self, sys: &mut dyn System) {
+        self.lock.lock_now(sys);
+    }
+
+    /// The display turned off (power management).
+    pub fn on_screen_off(&mut self, sys: &mut dyn System) {
+        self.lock.on_screen_off(sys);
+    }
+
+    /// The display woke up again (power management).
+    pub fn on_wake(&mut self, sys: &mut dyn System) {
+        self.lock.on_wake(sys);
     }
 
     /// Id of the app in the foreground.
@@ -423,7 +447,29 @@ impl Desktop {
         if let Some(tag) = self.pending_snapshot.take() {
             self.capture(canvas, body, tag);
         }
-        let mut proxy = SysProxy { inner: sys, launch: None, close: Vec::new(), usage: self.usage.clone() };
+        let mut proxy = SysProxy { inner: sys, launch: None, close: Vec::new(), usage: self.usage.clone(), lock: false };
+
+        // The lock screen covers everything and takes all input, so it
+        // comes before gestures. The touch that found the screen locked only
+        // wakes it. Background work (music) carries on behind it.
+        let just_locked = self.lock.check(input, proxy.inner);
+        if self.lock.is_locked() {
+            self.gestures.reset();
+            self.track = None;
+            let quiet = Input { pos: input.pos, down: input.down, press_pos: input.press_pos, ..Default::default() };
+            let input = if just_locked { &quiet } else { input };
+            let next = self.lock.frame(canvas, input, &self.fonts, &self.theme, proxy.inner);
+            let bg_due = self.background_ticks(&mut proxy, now, true);
+            if now.saturating_sub(self.last_check) >= CHECK_MS {
+                self.check_resources(&mut proxy, now);
+            }
+            return match (next, bg_due) {
+                (Some(n), Some(due)) => Some(n.min(due.saturating_sub(now) as u32)),
+                (None, Some(due)) => Some(due.saturating_sub(now) as u32),
+                (n, None) => n,
+            };
+        }
+
         let keyboard_was_open = self.keyboard_open;
         let fg_before = self.fg;
         let switcher_before = self.switcher.is_some();
@@ -500,6 +546,10 @@ impl Desktop {
         self.draw_notice(canvas, body, now);
         self.status_bar(canvas, input, status, &mut proxy);
 
+        if proxy.lock {
+            self.lock.lock_now(proxy.inner);
+            return Some(0);
+        }
         // Requests made by apps during the frame.
         let closes = core::mem::take(&mut proxy.close);
         for tag in closes {
@@ -511,7 +561,7 @@ impl Desktop {
             }
             self.start(&id, &mut proxy);
         }
-        let bg_due = self.background_ticks(&mut proxy, now);
+        let bg_due = self.background_ticks(&mut proxy, now, false);
         if now.saturating_sub(self.last_check) >= CHECK_MS {
             self.check_resources(&mut proxy, now);
         }
@@ -603,18 +653,25 @@ impl Desktop {
     }
 
     /// Ticks for background apps with a granted capability. Returns when
-    /// the next one is due.
-    fn background_ticks(&mut self, sys: &mut dyn System, now: u64) -> Option<u64> {
+    /// the next one is due. While the screen is locked the foreground app
+    /// is not drawn either, so it is treated the same way (without being
+    /// suspended when it has no background work).
+    fn background_ticks(&mut self, sys: &mut dyn System, now: u64, locked: bool) -> Option<u64> {
         let mut due: Option<u64> = None;
         let mut suspend = Vec::new();
         for (i, r) in self.running.iter_mut().enumerate() {
-            if r.state != AppState::Background {
+            let fg = r.state == AppState::Foreground;
+            if r.state != AppState::Background && !(locked && fg) {
                 continue;
             }
             let granted = lifecycle::granted(APPS[r.info].background, r.app.background_work());
-            r.granted = granted;
+            if !fg {
+                r.granted = granted;
+            }
             if granted.is_empty() {
-                suspend.push(i);
+                if !fg {
+                    suspend.push(i);
+                }
                 continue;
             }
             if now >= r.next_bg_tick {
@@ -702,6 +759,7 @@ impl Desktop {
             format!("CPU {:.0}%  RAM {}M", stats.cpu_load * 100.0, used / 1024)
         };
         let orientation = sys.orientation();
+        let lockable = lock::is_configured(sys);
         // While a dialog is up, the status bar does not react.
         let blocked = self.hang.is_some();
         let mut idle = input.clone();
@@ -719,11 +777,22 @@ impl Desktop {
             let phone = Rect::new(b.x + (b.w - w) / 2, b.y + (b.h - h) / 2, w, h);
             c.stroke_round_rect(phone, 3, 2, col);
         });
-        ui.text(Rect::new(r.x + 52, r.y, 120, r.h), "p4os", &f, dim, Align::Left);
+        // Lock button, shown only when there is a lock to engage.
+        let mut lock_tapped = false;
+        let mut label_x = r.x + 52;
+        if lockable {
+            let lr = Rect::new(r.x + 52, r.y, 40, r.h);
+            lock_tapped = ui.icon_button(lr, |c, b, col| lock::padlock(c, b.center(), 16, col));
+            label_x = lr.right() + 6;
+        }
+        ui.text(Rect::new(label_x, r.y, 120, r.h), "p4os", &f, dim, Align::Left);
         ui.text(r, &clock, &f, text, Align::Center);
         ui.text(Rect::new(r.x, r.y, r.w - 14, r.h), &right, &f, dim, Align::Right);
         if rotate {
             sys.set_orientation(orientation.toggled());
+        }
+        if lock_tapped {
+            sys.lock_now();
         }
     }
 
@@ -931,6 +1000,8 @@ struct SysProxy<'a> {
     close: Vec<u8>,
     /// Built-in app usage as of the last check.
     usage: Rc<Vec<AppUsage>>,
+    /// An app or the status bar asked to lock the screen.
+    lock: bool,
 }
 
 impl System for SysProxy<'_> {
@@ -1010,6 +1081,12 @@ impl System for SysProxy<'_> {
             AppHandle::Builtin(tag) => self.close.push(tag),
             AppHandle::User(_) => self.inner.close_app(app),
         }
+    }
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        self.inner.fill_random(buf)
+    }
+    fn lock_now(&mut self) {
+        self.lock = true;
     }
 }
 
@@ -1184,6 +1261,23 @@ mod tests {
         r.tap(10, STATUS_H + 40 + 50);
         r.frame();
         assert_eq!(r.d.running_app(), Some("calculator"));
+    }
+
+    #[test]
+    fn lock_screen_takes_precedence_over_gestures() {
+        let mut r = Rig::new();
+        r.launch("calculator");
+        r.sys.config_set(p4os_sdk::config::LOCK_ENABLED, "1");
+        r.sys.config_set(p4os_sdk::config::LOCK_PIN, "any-hash");
+        r.d.lock_now(&mut r.sys);
+        r.frame();
+        assert!(r.d.is_locked());
+        r.swipe((240, 795), (240, 600), 0);
+        r.swipe((240, 795), (240, 600), 400);
+        r.swipe((2, 400), (200, 400), 0);
+        assert!(r.d.is_locked());
+        assert!(r.d.switcher.is_none());
+        assert_eq!(r.d.running_app(), Some("calculator"), "nothing reached the app manager");
     }
 
     #[test]

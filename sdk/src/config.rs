@@ -27,9 +27,29 @@ pub const UI_ORIENTATION: &str = "ui.orientation";
 /// Backlight level in whole percent, "5".."100".
 pub const UI_BRIGHTNESS: &str = "ui.brightness";
 
+/// Lock screen switch, "1" or "0". The lock is only active when a passcode
+/// is stored as well.
+pub const LOCK_ENABLED: &str = "lock.enabled";
+/// Salted passcode hash `v1$<iterations>$<salt hex>$<hash hex>`, never the
+/// passcode itself. Empty or absent: no passcode.
+pub const LOCK_PIN: &str = "lock.pin";
+/// Wrong passcode attempts since the last successful unlock.
+pub const LOCK_FAILS: &str = "lock.fails";
+/// Pending lockout: its end in Unix seconds, or "?" when the wall clock was
+/// unknown. Empty or absent: no lockout.
+pub const LOCK_UNTIL: &str = "lock.until";
+/// Auto-lock: "screen-off" (default), "1m", "5m" or "never".
+pub const LOCK_AUTO: &str = "lock.auto";
+
 /// Keys whose values are write-only for apps and never printed.
 pub fn is_secret(key: &str) -> bool {
     key == WIFI_PASSWORD
+}
+
+/// Keys printed as `[set]` in listings: the secrets, plus the passcode hash,
+/// which the desktop must read back but which is never shown.
+pub fn is_masked(key: &str) -> bool {
+    is_secret(key) || key == LOCK_PIN
 }
 
 pub type Entries = BTreeMap<String, String>;
@@ -297,6 +317,15 @@ mod tests {
         assert_eq!(parse_brightness("0"), None);
         assert_eq!(parse_brightness("101"), None);
         assert_eq!(parse_brightness("x"), None);
+    }
+
+    #[test]
+    fn masked_keys() {
+        assert!(is_masked(WIFI_PASSWORD));
+        assert!(is_masked(LOCK_PIN));
+        assert!(!is_secret(LOCK_PIN), "the desktop must be able to read the hash");
+        assert!(!is_masked(LOCK_FAILS));
+        assert!(!is_masked(WIFI_SSID));
     }
 
     #[test]
