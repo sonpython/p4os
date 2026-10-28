@@ -21,8 +21,9 @@ pub const RATE: u32 = 48_000;
 const MAX_FRAME: usize = 5760;
 /// Stack for the decoder thread (see the module docs).
 pub const DECODER_STACK: usize = 128 * 1024;
-/// Decoded 20 ms chunks buffered ahead of the speaker (~2 s).
-pub const PCM_QUEUE: usize = 100;
+/// Decoded samples buffered ahead of the speaker: 2 s of stereo, one
+/// 375 KiB ring (in PSRAM) rather than many small chunks (in SRAM).
+pub const PCM_QUEUE: usize = 2 * 2 * RATE as usize;
 const IDLE_SLEEP_MS: u32 = 5;
 
 /// State shared between the player, the decoder thread and the audio thread.
@@ -127,7 +128,7 @@ pub fn decode_packets(packets: &[Packet], channels: u8, pre_skip: u16) -> Result
 /// inside the thread, whose stack is large enough for opus-rs.
 pub struct DecoderThread {
     pub packets: Consumer<Packet>,
-    pub pcm: Producer<Vec<i16>>,
+    pub pcm: Producer<i16>,
     pub channels: u8,
     pub pre_skip: u16,
     pub start_ms: i64,
@@ -142,11 +143,12 @@ impl DecoderThread {
             c.failed.store(true, Ordering::Release);
             return;
         };
-        let mut pending: Option<Vec<i16>> = None;
+        // Decoded samples not yet in the ring, and how many were moved.
+        let (mut pending, mut done) = (Vec::new(), 0);
         while !c.stop.load(Ordering::Acquire) {
-            if let Some(chunk) = pending.take() {
-                if let Err(chunk) = self.pcm.push(chunk) {
-                    pending = Some(chunk);
+            if done < pending.len() {
+                done += self.pcm.push_slice(&pending[done..]);
+                if done < pending.len() {
                     w.sleep_ms(IDLE_SLEEP_MS);
                 }
                 continue;
@@ -164,7 +166,8 @@ impl DecoderThread {
                 Ok(pcm) => {
                     let sum = pcm.iter().fold(0u32, |a, v| a.wrapping_add(v.unsigned_abs() as u32));
                     c.checksum.fetch_add(sum, Ordering::Relaxed);
-                    pending = Some(pcm);
+                    pending = pcm;
+                    done = 0;
                 }
                 Err(_) => {
                     c.decode_errors.fetch_add(1, Ordering::Relaxed);
@@ -178,16 +181,14 @@ impl DecoderThread {
 
 /// The [`AudioSource`] given to the OS: copies decoded PCM, keeps the clock.
 pub struct PcmSource {
-    pcm: Consumer<Vec<i16>>,
-    cur: Vec<i16>,
-    pos: usize,
+    pcm: Consumer<i16>,
     clock: Arc<AudioClock>,
     starved: bool,
 }
 
 impl PcmSource {
-    pub fn new(pcm: Consumer<Vec<i16>>, clock: Arc<AudioClock>) -> Self {
-        Self { pcm, cur: Vec::new(), pos: 0, clock, starved: false }
+    pub fn new(pcm: Consumer<i16>, clock: Arc<AudioClock>) -> Self {
+        Self { pcm, clock, starved: false }
     }
 }
 
@@ -197,35 +198,28 @@ impl AudioSource for PcmSource {
     }
 
     fn fill(&mut self, out: &mut [i16]) -> usize {
-        let mut n = 0;
-        while n + 1 < out.len() {
-            if self.pos >= self.cur.len() {
-                if let Some(next) = self.pcm.pop() {
-                    self.cur = next;
-                    self.pos = 0;
-                    continue;
-                }
-                if self.clock.decoded_all.load(Ordering::Acquire) && self.pcm.is_empty() {
-                    self.clock.finished.store(true, Ordering::Release);
-                    break;
-                }
-                // Starved: play silence without advancing the clock, so
-                // video waits for the network too.
-                if !self.starved {
-                    self.clock.underruns.fetch_add(1, Ordering::Relaxed);
-                    self.starved = true;
-                }
-                out[n..].fill(0);
-                return out.len() & !1;
-            }
+        let want = out.len() & !1;
+        // Whole stereo frames only: the decoder always pushes pairs, but a
+        // pop may race with a push that is half done.
+        let avail = self.pcm.len() & !1;
+        let n = self.pcm.pop_slice(&mut out[..want.min(avail)]);
+        self.clock.played.fetch_add((n / 2) as u32, Ordering::Relaxed);
+        if n == want {
             self.starved = false;
-            let take = (self.cur.len() - self.pos).min((out.len() - n) & !1);
-            out[n..n + take].copy_from_slice(&self.cur[self.pos..self.pos + take]);
-            self.pos += take;
-            n += take;
-            self.clock.played.fetch_add((take / 2) as u32, Ordering::Relaxed);
+            return n;
         }
-        n
+        if self.clock.decoded_all.load(Ordering::Acquire) && self.pcm.is_empty() {
+            self.clock.finished.store(true, Ordering::Release);
+            return n;
+        }
+        // Starved: play silence without advancing the clock, so video
+        // waits for the network too.
+        if !self.starved {
+            self.clock.underruns.fetch_add(1, Ordering::Relaxed);
+            self.starved = true;
+        }
+        out[n..want].fill(0);
+        want
     }
 }
 
@@ -245,7 +239,8 @@ pub(crate) mod tests {
         let segs = webm::parse_cues(&TONE[cs..ce], &init, TONE.len() as u64).unwrap();
         let mut packets = Vec::new();
         for s in &segs {
-            packets.extend(webm::parse_clusters(&TONE[s.offset as usize..(s.offset + s.size) as usize], &init).unwrap());
+            let chunk = Arc::new(TONE[s.offset as usize..(s.offset + s.size) as usize].to_vec());
+            packets.extend(webm::parse_clusters(&chunk, &init).unwrap());
         }
         (init, packets)
     }

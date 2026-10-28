@@ -2,8 +2,11 @@
 //! segment (`moov`: timescale, `avcC`), the segment index (`sidx`) and media
 //! fragments (`moof` + `mdat`) turned into Annex-B access units.
 
+use crate::slice::Slice;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 /// Box header: type, header length, total length (bounded by `data`).
 fn read_box(data: &[u8], pos: usize) -> Option<([u8; 4], usize, usize)> {
@@ -55,8 +58,8 @@ pub struct VideoInit {
     pub height: u16,
     /// Bytes in each NAL length prefix (1, 2 or 4).
     pub nal_length_size: usize,
-    /// SPS and PPS NAL units as one Annex-B blob, prepended to sync samples.
-    pub parameter_sets: Vec<u8>,
+    /// SPS and PPS NAL units as one Annex-B blob, sent with sync samples.
+    pub parameter_sets: Arc<Vec<u8>>,
     /// `trex` defaults for fragments that do not override them.
     pub default_duration: u32,
     pub default_size: u32,
@@ -74,20 +77,22 @@ fn parse_avcc(avcc: &[u8], init: &mut VideoInit) -> Result<(), String> {
         return Err("avcC: 3-byte NAL lengths".into());
     }
     let mut pos = 5;
+    let mut sets = Vec::new();
     for count_mask in [0x1F, 0xFF] {
         let count = *avcc.get(pos).ok_or("avcC truncated")? & count_mask;
         pos += 1;
         for _ in 0..count {
             let len = be16(avcc, pos).ok_or("avcC truncated")? as usize;
             let nal = avcc.get(pos + 2..pos + 2 + len).ok_or("avcC truncated")?;
-            init.parameter_sets.extend_from_slice(&START_CODE);
-            init.parameter_sets.extend_from_slice(nal);
+            sets.extend_from_slice(&START_CODE);
+            sets.extend_from_slice(nal);
             pos += 2 + len;
         }
     }
-    if init.parameter_sets.is_empty() {
+    if sets.is_empty() {
         return Err("avcC has no SPS/PPS".into());
     }
+    init.parameter_sets = Arc::new(sets);
     Ok(())
 }
 
@@ -171,45 +176,84 @@ pub fn parse_sidx(data: &[u8], at: u64) -> Result<Vec<Segment>, String> {
 pub struct Sample {
     pub pts_ms: i64,
     pub is_sync: bool,
-    pub data: Vec<u8>,
+    pub data: Slice,
+    /// SPS/PPS to feed the decoder first, on sync samples, so decoding can
+    /// start at any of them.
+    pub params: Option<Arc<Vec<u8>>>,
 }
 
-/// Convert length-prefixed NAL units to Annex-B.
-fn to_annex_b(avcc: &[u8], nls: usize, out: &mut Vec<u8>) -> Result<(), String> {
+/// Where a sample is, before conversion.
+struct SampleRef {
+    pts_ms: i64,
+    is_sync: bool,
+    range: Range<usize>,
+}
+
+/// Rewrite 4-byte NAL lengths as Annex-B start codes in place.
+fn annex_b_in_place(au: &mut [u8]) -> Result<(), String> {
+    let mut p = 0;
+    while p < au.len() {
+        let len = be32(au, p).ok_or("NAL length cut short")? as usize;
+        if p + 4 + len > au.len() {
+            return Err("NAL runs past the sample".into());
+        }
+        au[p..p + 4].copy_from_slice(&START_CODE);
+        p += 4 + len;
+    }
+    Ok(())
+}
+
+/// Convert 1- or 2-byte length-prefixed NAL units to Annex-B (a copy).
+fn annex_b_copy(avcc: &[u8], nls: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(avcc.len() + 16);
     let mut p = 0;
     while p < avcc.len() {
-        let len = match nls {
-            1 => *avcc.get(p).ok_or("nal")? as usize,
-            2 => be16(avcc, p).ok_or("nal")? as usize,
-            _ => be32(avcc, p).ok_or("nal")? as usize,
-        };
+        let len = if nls == 1 { *avcc.get(p).ok_or("nal")? as usize } else { be16(avcc, p).ok_or("nal")? as usize };
         let nal = avcc.get(p + nls..p + nls + len).ok_or("NAL runs past the sample")?;
         out.extend_from_slice(&START_CODE);
         out.extend_from_slice(nal);
         p += nls + len;
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Demux every `moof` + `mdat` pair in `data` (whole fragments, as fetched
-/// by segment ranges). Sync samples get the SPS/PPS prepended so decoding
-/// can start at any of them.
-pub fn parse_fragments(data: &[u8], init: &VideoInit) -> Result<Vec<Sample>, String> {
-    let mut out = Vec::new();
+/// by segment ranges). The samples point into `data`, converted in place.
+pub fn parse_fragments(mut data: Vec<u8>, init: &VideoInit) -> Result<Vec<Sample>, String> {
+    let mut refs = Vec::new();
     let mut pos = 0;
-    while let Some((kind, hdr, size)) = read_box(data, pos) {
+    while let Some((kind, hdr, size)) = read_box(&data, pos) {
         if pos + size > data.len() {
             return Err("fragment cut short".into());
         }
         if &kind == b"moof" {
-            parse_moof(data, pos, &data[pos + hdr..pos + size], init, &mut out)?;
+            parse_moof(&data, pos, &data[pos + hdr..pos + size], init, &mut refs)?;
         }
         pos += size;
     }
-    Ok(out)
+    let mut copies = Vec::new();
+    for r in &refs {
+        if init.nal_length_size == 4 {
+            annex_b_in_place(&mut data[r.range.clone()])?;
+        } else {
+            copies.push(Slice::copy_of(&annex_b_copy(&data[r.range.clone()], init.nal_length_size)?));
+        }
+    }
+    let data = Arc::new(data);
+    let mut copies = copies.into_iter();
+    let samples = refs
+        .into_iter()
+        .map(|r| Sample {
+            pts_ms: r.pts_ms,
+            is_sync: r.is_sync,
+            data: if init.nal_length_size == 4 { Slice::new(&data, r.range) } else { copies.next().expect("one copy per sample") },
+            params: r.is_sync.then(|| init.parameter_sets.clone()),
+        })
+        .collect();
+    Ok(samples)
 }
 
-fn parse_moof(data: &[u8], moof_at: usize, moof: &[u8], init: &VideoInit, out: &mut Vec<Sample>) -> Result<(), String> {
+fn parse_moof(data: &[u8], moof_at: usize, moof: &[u8], init: &VideoInit, out: &mut Vec<SampleRef>) -> Result<(), String> {
     for (kind, traf) in children(moof) {
         if &kind != b"traf" {
             continue;
@@ -273,15 +317,12 @@ fn parse_moof(data: &[u8], moof_at: usize, moof: &[u8], init: &VideoInit, out: &
                 let cto = field(0x800, 0)?;
                 let cto = if version == 0 { cto as i64 } else { cto as i32 as i64 };
                 let start = data_pos as usize;
-                let avcc = data.get(start..start + size).ok_or("sample outside the fetched data")?;
-                let is_sync = sflags & 0x0001_0000 == 0;
-                let mut au = Vec::with_capacity(size + if is_sync { init.parameter_sets.len() } else { 0 } + 16);
-                if is_sync {
-                    au.extend_from_slice(&init.parameter_sets);
+                if start + size > data.len() {
+                    return Err("sample outside the fetched data".into());
                 }
-                to_annex_b(avcc, init.nal_length_size, &mut au)?;
+                let is_sync = sflags & 0x0001_0000 == 0;
                 let pts = dts as i64 + cto;
-                out.push(Sample { pts_ms: pts * 1000 / init.timescale as i64, is_sync, data: au });
+                out.push(SampleRef { pts_ms: pts * 1000 / init.timescale as i64, is_sync, range: start..start + size });
                 data_pos += size as u64;
                 dts += dur as u64;
             }
@@ -366,7 +407,7 @@ pub(crate) mod tests {
     fn parses_init_segment() {
         let init = parse_init(&init_segment(15360)).unwrap();
         assert_eq!((init.timescale, init.width, init.height, init.nal_length_size), (15360, 426, 240, 4));
-        assert_eq!(init.parameter_sets, [&[0, 0, 0, 1][..], SPS, &[0, 0, 0, 1], PPS].concat());
+        assert_eq!(*init.parameter_sets, [&[0, 0, 0, 1][..], SPS, &[0, 0, 0, 1], PPS].concat());
         assert_eq!((init.default_duration, init.default_flags), (1000, 0x0001_0000));
         assert!(parse_init(b"garbage").is_err());
     }
@@ -375,13 +416,15 @@ pub(crate) mod tests {
     fn parses_fragments_into_annex_b_samples() {
         let init = parse_init(&init_segment(1000)).unwrap();
         let data = [fragment(5000), fragment(8000)].concat();
-        let s = parse_fragments(&data, &init).unwrap();
+        let s = parse_fragments(data.clone(), &init).unwrap();
         assert_eq!(s.len(), 6);
         assert_eq!(s.iter().map(|x| x.pts_ms).collect::<Vec<_>>(), [6000, 9000, 7000, 9000, 12000, 10000]);
         assert_eq!(s.iter().map(|x| x.is_sync).collect::<Vec<_>>(), [true, false, false, true, false, false]);
-        assert_eq!(s[0].data, [&init.parameter_sets[..], &[0, 0, 0, 1, 0x65, 1, 2, 3]].concat());
-        assert_eq!(s[1].data, [0, 0, 0, 1, 0x41, 4]);
-        assert!(parse_fragments(&data[..data.len() - 3], &init).is_err());
+        assert_eq!(&s[0].data[..], [0, 0, 0, 1, 0x65, 1, 2, 3]);
+        assert_eq!(s[0].params.as_deref(), Some(&*init.parameter_sets));
+        assert_eq!(&s[1].data[..], [0, 0, 0, 1, 0x41, 4]);
+        assert!(s[1].params.is_none());
+        assert!(parse_fragments(data[..data.len() - 3].to_vec(), &init).is_err());
     }
 
     #[test]

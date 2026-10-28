@@ -24,8 +24,9 @@ pub const INFO: AppInfo = AppInfo { id: APP_ID, name: "YT Player", icon, create 
 pub const DEFAULT_MODE: Mode = Mode::Video(Quality::P144);
 
 const SEEK_STEP_MS: i64 = 10_000;
-/// Tick period while video plays: frames are picked on every GUI frame.
-const VIDEO_TICK_MS: u32 = 15;
+/// Longest wait between GUI frames while video plays, and the shortest.
+const VIDEO_TICK_MS: u32 = 40;
+const MIN_TICK_MS: u32 = 4;
 const AUDIO_TICK_MS: u32 = 100;
 const IDLE_TICK_MS: u32 = 250;
 /// Landscape controls stay visible this long after a tap.
@@ -128,7 +129,12 @@ impl PlayerView {
     pub fn tick_interval_ms(&self) -> u32 {
         match &self.player {
             Some(p) if p.is_active() => match p.presentation() {
-                Some(Presentation::Video { .. }) => VIDEO_TICK_MS,
+                // Redraw when the next picture is due, not on a fixed beat:
+                // every GUI frame repaints the whole screen.
+                Some(Presentation::Video { .. }) if !p.paused => match p.next_frame_in_ms() {
+                    Some(ms) => (ms as u32).clamp(MIN_TICK_MS, VIDEO_TICK_MS),
+                    None => VIDEO_TICK_MS,
+                },
                 _ => AUDIO_TICK_MS,
             },
             _ => IDLE_TICK_MS,
@@ -170,12 +176,18 @@ impl PlayerView {
                 }
             }
         }
-        ui.fill(area, ui.theme.bg);
         if self.player.is_none() {
+            ui.fill(area, ui.theme.bg);
             self.entry_screen(ui, area, sys);
             return ViewEvent::None;
         }
-        if self.landscape { self.landscape_screen(ui, area, sys) } else { self.portrait_screen(ui, area, sys) }
+        let t = sys.uptime_ms();
+        let ev = if self.landscape { self.landscape_screen(ui, area, sys) } else { self.portrait_screen(ui, area, sys) };
+        if let Some(p) = &mut self.player {
+            p.stats.draw_ms += sys.uptime_ms() - t;
+            p.stats.draws += 1;
+        }
+        ev
     }
 
     /// No video yet (opened from the launcher): ask for an id or URL.
@@ -202,6 +214,8 @@ impl PlayerView {
 
     fn portrait_screen(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) -> ViewEvent {
         let video = Rect::new(area.x, area.y, area.w, area.w * 9 / 16);
+        // Each pixel is written once: the video area paints itself.
+        ui.fill(Rect::new(area.x, video.bottom(), area.w, area.bottom() - video.bottom()), ui.theme.bg);
         self.draw_media(ui, video, sys);
         let p = self.player.as_ref().expect("checked by update");
         let mut y = video.bottom() + 10;
@@ -238,7 +252,6 @@ impl PlayerView {
 
     fn landscape_screen(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) -> ViewEvent {
         let now = sys.uptime_ms();
-        ui.fill(area, VIDEO_BG);
         self.draw_media(ui, area, sys);
         // A tap that is not on a visible control toggles the controls.
         let shown = now < self.overlay_until;
@@ -366,9 +379,8 @@ impl PlayerView {
 
     /// The video frame, storyboard thumbnail or audio visual in `r`.
     fn draw_media(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
-        ui.fill(r, VIDEO_BG);
         let now = sys.uptime_ms();
-        let Some(p) = self.player.as_mut() else { return };
+        let Some(p) = self.player.as_mut() else { return ui.fill(r, VIDEO_BG) };
         let busy = match &p.phase {
             Phase::LookingUp => Some("Looking up the video..."),
             Phase::Opening => Some("Opening streams..."),
@@ -379,12 +391,16 @@ impl PlayerView {
         if let Some(f) = p.frame() {
             let (w, h) = (f.width, f.height);
             let dst = fit(r, w as i32, h as i32);
+            fill_around(ui.canvas, r, dst, VIDEO_BG);
             blit_scaled(ui.canvas, &mut self.xmap, &mut self.row, dst, &f.pixels, w, h);
             drew = true;
         } else if let Some((img, cell)) = p.thumbnail(now) {
             let dst = fit(r, cell.2, cell.3);
+            fill_around(ui.canvas, r, dst, VIDEO_BG);
             blit_cell(ui.canvas, &mut self.xmap, &mut self.row, dst, &img.pixels, img.width as usize, cell);
             drew = true;
+        } else {
+            ui.fill(r, VIDEO_BG);
         }
         let p = self.player.as_ref().expect("checked above");
         if !drew && matches!(p.presentation(), Some(Presentation::Audio { .. })) {
@@ -420,6 +436,14 @@ fn indicator(p: &Player) -> String {
 fn clock_text(ms: u64) -> String {
     let s = ms / 1000;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+/// Fill the parts of `outer` that `inner` (inside it) leaves uncovered.
+fn fill_around(c: &mut Canvas, outer: Rect, inner: Rect, col: Color) {
+    c.fill_rect(Rect::new(outer.x, outer.y, outer.w, inner.y - outer.y), col);
+    c.fill_rect(Rect::new(outer.x, inner.bottom(), outer.w, outer.bottom() - inner.bottom()), col);
+    c.fill_rect(Rect::new(outer.x, inner.y, inner.x - outer.x, inner.h), col);
+    c.fill_rect(Rect::new(inner.right(), inner.y, outer.right() - inner.right(), inner.h), col);
 }
 
 /// The largest rectangle of aspect `w:h` centred in `r`.

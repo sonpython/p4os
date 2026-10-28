@@ -132,6 +132,10 @@ impl DecoderThread {
                 }
             }
             let t = w.now_us();
+            if let Some(p) = &item.sample.params {
+                // SPS/PPS only: never yields a picture.
+                let _ = decoder.decode(p);
+            }
             let picture = decoder.decode(&item.sample.data);
             let dt = (w.now_us() - t) as u32;
             sh.decode_us.fetch_add(dt, Ordering::Relaxed);
@@ -202,6 +206,9 @@ pub fn decode_all(samples: &[Sample]) -> Result<Vec<Picture>, String> {
     let mut dec = Decoder::new();
     let mut out = Vec::new();
     for s in samples {
+        if let Some(p) = &s.params {
+            dec.decode(p).map_err(|e| alloc::format!("{e}"))?;
+        }
         if let Some(f) = dec.decode(&s.data).map_err(|e| alloc::format!("{e}"))? {
             out.push(Picture { pts_ms: s.pts_ms, width: f.width, height: f.height, y: f.y, u: f.u, v: f.v });
         }
@@ -237,7 +244,7 @@ pub(crate) mod tests {
         let mut samples = Vec::new();
         for s in &segs {
             let bytes = &PATTERN[s.offset as usize..(s.offset + s.size) as usize];
-            samples.extend(mp4::parse_fragments(bytes, &init).unwrap());
+            samples.extend(mp4::parse_fragments(bytes.to_vec(), &init).unwrap());
         }
         samples
     }

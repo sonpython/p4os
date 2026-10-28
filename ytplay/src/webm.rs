@@ -3,6 +3,9 @@
 //! `Cluster`s of `SimpleBlock`s turned into Opus packets.
 
 use crate::mp4::Segment;
+use crate::slice::Slice;
+use alloc::sync::Arc;
+use core::ops::Range;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -221,7 +224,7 @@ pub fn parse_cues(data: &[u8], init: &AudioInit, content_length: u64) -> Result<
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
     pub pts_ms: i64,
-    pub data: Vec<u8>,
+    pub data: Slice,
 }
 
 /// Split a laced block payload into frames.
@@ -283,7 +286,13 @@ fn unlace(d: &[u8], lacing: u8) -> Option<Vec<&[u8]>> {
 }
 
 /// Demux every Opus packet of `init.track` from whole clusters in `data`.
-pub fn parse_clusters(data: &[u8], init: &AudioInit) -> Result<Vec<Packet>, String> {
+pub fn parse_clusters(chunk: &Arc<Vec<u8>>, init: &AudioInit) -> Result<Vec<Packet>, String> {
+    let ranges = cluster_ranges(chunk, init)?;
+    Ok(ranges.into_iter().map(|(pts_ms, r)| Packet { pts_ms, data: Slice::new(chunk, r) }).collect())
+}
+
+/// Packet times and byte ranges (within `data`) of whole clusters.
+fn cluster_ranges(data: &[u8], init: &AudioInit) -> Result<Vec<(i64, Range<usize>)>, String> {
     let mut out = Vec::new();
     let mut p = 0;
     while let Some(c) = element(data, p) {
@@ -315,7 +324,7 @@ pub fn parse_clusters(data: &[u8], init: &AudioInit) -> Result<Vec<Packet>, Stri
                     _ => None,
                 };
                 if let Some(blk) = block
-                    && let Err(err) = push_block(blk, cluster_tc, init, &mut out)
+                    && let Err(err) = push_block(data, blk, cluster_tc, init, &mut out)
                 {
                     bad = Some(err);
                     return false;
@@ -335,6 +344,7 @@ pub fn parse_clusters(data: &[u8], init: &AudioInit) -> Result<Vec<Packet>, Stri
 /// complete cluster. Used by `yt bench` and host tools.
 pub fn demux_file(data: &[u8]) -> Result<(AudioInit, Vec<Packet>), String> {
     let init = parse_init(data)?;
+    let all = Arc::new(data.to_vec());
     let mut packets = Vec::new();
     let mut p = init.segment_start as usize;
     while let Some(e) = element(data, p) {
@@ -342,14 +352,16 @@ pub fn demux_file(data: &[u8]) -> Result<(AudioInit, Vec<Packet>), String> {
             break;
         }
         if e.id == ID_CLUSTER {
-            packets.extend(parse_clusters(&data[p..e.body + e.len], &init)?);
+            for (pts_ms, r) in cluster_ranges(&data[p..e.body + e.len], &init)? {
+                packets.push(Packet { pts_ms, data: Slice::new(&all, r.start + p..r.end + p) });
+            }
         }
         p = e.body + e.len;
     }
     Ok((init, packets))
 }
 
-fn push_block(blk: &[u8], cluster_tc: i64, init: &AudioInit, out: &mut Vec<Packet>) -> Result<(), String> {
+fn push_block(base: &[u8], blk: &[u8], cluster_tc: i64, init: &AudioInit, out: &mut Vec<(i64, Range<usize>)>) -> Result<(), String> {
     let (track, tl) = read_size(blk, 0).ok_or("bad block")?;
     if track != Some(init.track) {
         return Ok(());
@@ -361,7 +373,9 @@ fn push_block(blk: &[u8], cluster_tc: i64, init: &AudioInit, out: &mut Vec<Packe
     let pts_ms = init.ticks_to_ms(cluster_tc + rel);
     // Laced frames share the block time; Opus frames are 20 ms in practice.
     for (i, f) in frames.into_iter().enumerate() {
-        out.push(Packet { pts_ms: pts_ms + 20 * i as i64, data: f.to_vec() });
+        // `f` is a sub-slice of `base`: its offset is the pointer distance.
+        let at = f.as_ptr() as usize - base.as_ptr() as usize;
+        out.push((pts_ms + 20 * i as i64, at..at + f.len()));
     }
     Ok(())
 }
@@ -431,11 +445,11 @@ pub(crate) mod tests {
         assert_eq!((segs[0].start_ms, segs[1].start_ms), (0, 1000));
         assert_eq!(segs[0].offset, header_len as u64);
         let all = &file[segs[0].offset as usize..(segs[1].offset + segs[1].size) as usize];
-        let pk = parse_clusters(all, &init).unwrap();
+        let pk = parse_clusters(&Arc::new(all.to_vec()), &init).unwrap();
         let got: Vec<(i64, &[u8])> = pk.iter().map(|p| (p.pts_ms, &p.data[..])).collect();
         assert_eq!(got, vec![(0, &b"aa"[..]), (20, b"bb"), (1000, b"x"), (1020, b"yz"), (1040, b"cc")]);
         // A cluster that was cut short is an error, not silently dropped.
-        assert!(parse_clusters(&all[..all.len() - 2], &init).is_err());
+        assert!(parse_clusters(&Arc::new(all[..all.len() - 2].to_vec()), &init).is_err());
     }
 
     /// For a whole file: the end of the header (first Cues or Cluster) and
@@ -468,7 +482,8 @@ pub(crate) mod tests {
         let mut packets = Vec::new();
         for s in &segs {
             // Elements other than clusters (ffmpeg's trailing Cues) are skipped.
-            packets.extend(parse_clusters(&file[s.offset as usize..(s.offset + s.size) as usize], &init).unwrap());
+            let chunk = Arc::new(file[s.offset as usize..(s.offset + s.size) as usize].to_vec());
+            packets.extend(parse_clusters(&chunk, &init).unwrap());
         }
         // 1 s of 20 ms packets.
         assert!((50..=52).contains(&packets.len()), "{}", packets.len());

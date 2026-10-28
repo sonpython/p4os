@@ -131,8 +131,55 @@ impl<T: Send> Consumer<T> {
     }
 }
 
+impl<T: Send + Copy> Producer<T> {
+    /// Append as many items of `v` as fit; returns how many.
+    pub fn push_slice(&mut self, v: &[T]) -> usize {
+        let r = &*self.ring;
+        let cap = r.slots.len();
+        let tail = r.tail.load(Ordering::Relaxed);
+        let n = v.len().min(cap - tail.wrapping_sub(r.head.load(Ordering::Acquire)));
+        for (i, &x) in v[..n].iter().enumerate() {
+            // SAFETY: as in `push`; these `n` slots are free.
+            unsafe { (*r.slots[tail.wrapping_add(i) % cap].get()).write(x) };
+        }
+        r.tail.store(tail.wrapping_add(n), Ordering::Release);
+        n
+    }
+}
+
+impl<T: Send + Copy> Consumer<T> {
+    /// Take up to `out.len()` items; returns how many.
+    pub fn pop_slice(&mut self, out: &mut [T]) -> usize {
+        let r = &*self.ring;
+        let cap = r.slots.len();
+        let head = r.head.load(Ordering::Relaxed);
+        let n = out.len().min(r.tail.load(Ordering::Acquire).wrapping_sub(head));
+        for (i, o) in out[..n].iter_mut().enumerate() {
+            // SAFETY: as in `pop`; these `n` slots were published.
+            *o = unsafe { (*r.slots[head.wrapping_add(i) % cap].get()).assume_init_read() };
+        }
+        r.head.store(head.wrapping_add(n), Ordering::Release);
+        n
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moves_slices() {
+        let (mut tx, mut rx) = super::channel::<i16>(5);
+        assert_eq!(tx.push_slice(&[1, 2, 3]), 3);
+        let mut out = [0; 2];
+        assert_eq!(rx.pop_slice(&mut out), 2);
+        assert_eq!(out, [1, 2]);
+        // Wraps around the end of the ring and stops when full.
+        assert_eq!(tx.push_slice(&[4, 5, 6, 7, 8]), 4);
+        let mut out = [0; 8];
+        assert_eq!(rx.pop_slice(&mut out), 5);
+        assert_eq!(&out[..5], [3, 4, 5, 6, 7]);
+        assert_eq!(rx.pop_slice(&mut out), 0);
+    }
+
     use super::*;
     use alloc::vec::Vec;
 

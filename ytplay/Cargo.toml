@@ -7,6 +7,7 @@ description = "On-device YouTube playback engine for p4os: InnerTube stream look
 
 [dependencies]
 p4os-sdk = { path = "../sdk" }
+p4os-media = { path = "../media" }
 libm = "0.2"
 opus-rs = { version = "=0.1.40", default-features = false, features = ["libm"] }
 rusty_h264-decoder = { path = "../third_party/rusty_h264/decoder", features = ["libm"] }

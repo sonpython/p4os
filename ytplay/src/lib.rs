@@ -14,6 +14,7 @@ pub mod json;
 pub mod mp4;
 pub mod player;
 pub mod remote;
+pub mod slice;
 pub mod spsc;
 pub mod video;
 pub mod webm;

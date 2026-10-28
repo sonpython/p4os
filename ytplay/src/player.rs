@@ -24,7 +24,7 @@ use p4os_sdk::{FetchId, FetchState, FsError, HttpRequest, Image, PlaybackState, 
 
 /// Fetch more once less than this much is buffered ahead of the clock.
 const VIDEO_AHEAD_MS: u64 = 20_000;
-const AUDIO_AHEAD_MS: u64 = 40_000;
+const AUDIO_AHEAD_MS: u64 = 30_000;
 /// Upper bound of one Range request. Bigger ranges mean fewer TLS
 /// handshakes; smaller ones keep bursts of decryption (and memory) short.
 const CHUNK_BYTES: u64 = 384 * 1024;
@@ -44,6 +44,8 @@ const EXPIRY_MARGIN_S: u64 = 300;
 /// A second refusal this soon after a refresh is final.
 const REFRESH_GRACE_MS: u64 = 60_000;
 const DECODER_STACK: usize = 64 * 1024;
+/// Stack for decoding a storyboard JPEG (zune-jpeg).
+const SHEET_STACK: usize = 96 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -159,6 +161,8 @@ struct Sheets {
     board: Storyboard,
     sheet: Option<(u32, Image)>,
     fetch: Option<(u32, FetchId)>,
+    /// A sheet being decoded on a worker thread.
+    decoding: Option<(u32, Consumer<Option<Image>>)>,
     failed: bool,
 }
 
@@ -170,6 +174,10 @@ pub struct Stats {
     pub dropped_display: u32,
     pub fps: f32,
     pub net_kbps: f32,
+    /// Time spent drawing the player screen (ms, whole-ms resolution) and
+    /// the number of draws, for the average.
+    pub draw_ms: u64,
+    pub draws: u64,
 }
 
 pub struct Player {
@@ -206,6 +214,8 @@ pub struct Player {
     /// (window start, frames shown, bytes fetched) for rates.
     window: (u64, u32, u64),
     last_stats_ms: u64,
+    /// Clock at the last tick.
+    last_clock_ms: u64,
 }
 
 impl Player {
@@ -242,6 +252,7 @@ impl Player {
             wall_pos: 0,
             window: (now, 0, 0),
             last_stats_ms: 0,
+            last_clock_ms: 0,
         };
         if !valid_video_id(video_id) {
             p.phase = Phase::Failed(PlayError::new(ErrorKind::Unplayable, format!("{video_id:?} is not a YouTube video id")));
@@ -428,7 +439,7 @@ impl Player {
         if self.video.is_none()
             && let Some(spec) = self.info.as_ref().and_then(|i| i.storyboard_spec.as_deref())
         {
-            self.sheets = Storyboard::parse(spec).map(|board| Sheets { board, sheet: None, fetch: None, failed: false });
+            self.sheets = Storyboard::parse(spec).map(|board| Sheets { board, sheet: None, fetch: None, decoding: None, failed: false });
         }
     }
 
@@ -440,7 +451,10 @@ impl Player {
         shared.input_done.store(u32::MAX, Ordering::Relaxed);
         shared.generation.store(self.generation, Ordering::Relaxed);
         let thread = DecoderThread { input, output, free: free_rx, shared: shared.clone() };
-        sys.spawn_worker("ytvideo", Some(1), DECODER_STACK, Box::new(move |w| thread.run(w)))
+        // Not pinned: the GUI thread (higher priority) moves between the
+        // cores, and a decoder pinned to one of them stalls whenever the GUI
+        // lands there. Unpinned, it takes whichever core is free.
+        sys.spawn_worker("ytvideo", None, DECODER_STACK, Box::new(move |w| thread.run(w)))
             .map_err(|e| PlayError::new(ErrorKind::System, format!("cannot start the video decoder: {e}")))?;
         self.vout = Some(VideoOut { tx, pending: VecDeque::new(), frames, free, shared, ready: VecDeque::new(), current: None, current_drawn: false });
         Ok(())
@@ -673,7 +687,7 @@ impl Player {
             match inf.kind {
                 FetchKind::Header => self.parse_header(s, &data)?,
                 FetchKind::Segments { end } if inf.generation == self.generation => {
-                    self.demux(w, s, &data)?;
+                    self.demux(w, s, data)?;
                     s.next = end;
                 }
                 FetchKind::Segments { .. } => {}
@@ -747,11 +761,11 @@ impl Player {
         Ok(())
     }
 
-    fn demux(&mut self, w: Which, s: &Stream, data: &[u8]) -> Result<(), PlayError> {
+    fn demux(&mut self, w: Which, s: &Stream, data: Vec<u8>) -> Result<(), PlayError> {
         let bad = |e: String| PlayError::new(ErrorKind::BadResponse, e);
         match (&s.demux, w) {
             (Demux::Audio(Some(init)), Which::Audio) => {
-                let packets = webm::parse_clusters(data, init).map_err(bad)?;
+                let packets = webm::parse_clusters(&Arc::new(data), init).map_err(bad)?;
                 if let Some(a) = &mut self.aout {
                     a.pending.extend(packets);
                 }
@@ -882,6 +896,7 @@ impl Player {
     }
 
     fn pick_frame(&mut self, clock: u64) {
+        self.last_clock_ms = clock;
         let generation = self.generation;
         let Some(v) = &mut self.vout else { return };
         v.shared.clock_ms.store(clock as i32, Ordering::Relaxed);
@@ -904,6 +919,12 @@ impl Player {
         }
     }
 
+    /// Time until the next decoded picture is due, if one is ready.
+    pub fn next_frame_in_ms(&self) -> Option<u64> {
+        let pts = self.vout.as_ref()?.ready.front()?.pts_ms.max(0) as u64;
+        Some(pts.saturating_sub(self.last_clock_ms))
+    }
+
     /// The video frame to draw now; counts it as shown.
     pub fn frame(&mut self) -> Option<&VideoFrame> {
         let v = self.vout.as_mut()?;
@@ -921,15 +942,30 @@ impl Player {
         if sb.failed {
             return;
         }
+        if let Some((n, rx)) = &mut sb.decoding {
+            if let Some(img) = rx.pop() {
+                match img {
+                    Some(img) => sb.sheet = Some((*n, img)),
+                    None => sb.failed = true,
+                }
+                sb.decoding = None;
+            }
+            return;
+        }
         if let Some((n, id)) = sb.fetch {
             match sys.net().poll(id) {
                 FetchState::Pending => {}
                 FetchState::Done { status: 200, body, .. } => {
                     sb.fetch = None;
+                    // JPEG decoding needs more stack than the GUI thread has.
                     let (w, h) = ((sb.board.width * sb.board.cols) as i32, (sb.board.height * sb.board.rows) as i32);
-                    match sys.decode_image(&body, w, h) {
-                        Some(img) => sb.sheet = Some((n, img)),
-                        None => sb.failed = true,
+                    let (mut tx, rx) = spsc::channel(1);
+                    let job = move |_: &dyn p4os_sdk::Worker| {
+                        let _ = tx.push(p4os_media::image::decode(&body, w, h));
+                    };
+                    match sys.spawn_worker("ytsheet", None, SHEET_STACK, Box::new(job)) {
+                        Ok(()) => sb.decoding = Some((n, rx)),
+                        Err(_) => sb.failed = true,
                     }
                 }
                 _ => {
@@ -1062,7 +1098,7 @@ impl Player {
                 ));
             }
         }
-        s.push_str(&format!(" | net {:.0} kbit/s", self.stats.net_kbps));
+        s.push_str(&format!(" | net {:.0} kbit/s | draw avg {:.1} ms", self.stats.net_kbps, self.stats.draw_ms as f32 / self.stats.draws.max(1) as f32));
         s
     }
 

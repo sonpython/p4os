@@ -732,6 +732,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "opus-rs",
+ "p4os-media",
  "p4os-sdk",
  "rusty_h264-decoder",
 ]
