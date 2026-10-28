@@ -4,6 +4,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
+use crate::lock::security::SecurityPage;
 use p4os_sdk::config::{check_wifi, WIFI_SSID};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DateTime, Orientation, Point, Rect, System, Ui};
@@ -42,14 +43,16 @@ enum Section {
     Sound,
     Wifi,
     DateTime,
+    Security,
     About,
 }
 
-const SECTIONS: [(Section, &str); 5] = [
+const SECTIONS: [(Section, &str); 6] = [
     (Section::Display, "Display"),
     (Section::Sound, "Sound"),
     (Section::Wifi, "Wi-Fi"),
     (Section::DateTime, "Date & time"),
+    (Section::Security, "Security"),
     (Section::About, "About"),
 ];
 
@@ -168,6 +171,8 @@ struct Settings {
     password: String,
     wifi_loaded: bool,
     wifi_message: Option<String>,
+    /// Lock screen and passcode page (in `lock::security`).
+    security: SecurityPage,
 }
 
 /// Validate the Wi-Fi form; returns the SSID to join.
@@ -403,6 +408,7 @@ impl Settings {
             self.wifi_loaded = false;
             self.wifi_message = None;
             self.password.clear();
+            self.security.reset();
         }
     }
 
@@ -412,6 +418,7 @@ impl Settings {
             Section::Sound => self.sound(ui, pane, sys),
             Section::Wifi => self.wifi(ui, pane, sys),
             Section::DateTime => self.date_time(ui, pane, sys),
+            Section::Security => self.security.show(ui, pane, sys),
             Section::About => self.about(ui, pane, sys),
         }
     }
@@ -422,7 +429,7 @@ impl Settings {
         let (side, content) = area.split_left((area.w / 4).clamp(200, 280));
         ui.fill(side, t.surface);
         ui.canvas.fill_rect(Rect::new(side.right() - 1, side.y, 1, side.h), t.border);
-        let names: [&str; 5] = SECTIONS.map(|(_, n)| n);
+        let names = SECTIONS.map(|(_, n)| n);
         let list_r = Rect::new(side.x + 8, side.y + 12, side.w - 16, side.h - 24);
         if let Some(i) = ui.list(list_r, &names, 64, &mut self.list_offset, Some(self.section)) {
             self.select(i);
@@ -453,7 +460,7 @@ impl Settings {
             return;
         }
 
-        let names: [&str; 5] = SECTIONS.map(|(_, n)| n);
+        let names = SECTIONS.map(|(_, n)| n);
         let list_r = Rect::new(area.x + 12, area.y + 12, area.w - 24, area.h - 24);
         let row_h = 72;
         if let Some(i) = ui.list(list_r, &names, row_h, &mut self.list_offset, None) {

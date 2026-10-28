@@ -43,6 +43,10 @@ fn run(_: usize) {
             next_frame_at = 0;
             continue;
         }
+        if LOCK_REQUEST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            desktop.lock_now(&mut sys);
+            next_frame_at = 0;
+        }
         let had_input = poll_input(&mut input) | poll_touch(&mut input, sys.orientation);
         let now = now_ms();
         sys.save_brightness_if_settled(now);
@@ -104,6 +108,13 @@ fn blit(src: &[Color], o: Orientation, fb: &mut Framebuffer) {
     }
 }
 
+/// Set by the shell's `lock now`; the GUI thread locks on its next pass.
+static LOCK_REQUEST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn request_lock() {
+    LOCK_REQUEST.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// A tap requested from the shell (`tap X Y`, logical coordinates), used
 /// for automated UI tests: pressed on one frame, released on the next.
 static INJECTED_TAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -154,8 +165,9 @@ fn poll_touch(input: &mut Input, o: Orientation) -> bool {
             };
             if !input.down {
                 input.pressed = true;
+                // Touch positions are not logged: on the passcode keypad they
+                // would spell out the passcode on the serial console.
                 input.press_pos = pos;
-                kprintln!("touch down raw ({}, {}) -> {:?} {:?}", p.x, p.y, o, pos);
             }
             input.delta = Point::new(pos.x - input.pos.x, pos.y - input.pos.y);
             input.pos = pos;
@@ -360,6 +372,11 @@ impl System for KernelSystem {
         if let Err(e) = crate::config::set(key, value) {
             kprintln!("config: saving {} failed: {:?}", key, e);
         }
+    }
+
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        crate::rng::fill(buf);
+        true
     }
 }
 

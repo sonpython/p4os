@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod desktop;
 pub mod icons;
+pub mod lock;
 
 pub mod calculator;
 pub mod files;
