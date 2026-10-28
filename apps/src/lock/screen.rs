@@ -1,7 +1,7 @@
 //! Drawing the lock screen, plus the numeric keypad and passcode dots it
 //! shares with the Settings > Security page.
 
-use super::{Lock, throttle};
+use super::{Checking, Lock, throttle};
 use alloc::format;
 use alloc::vec::Vec;
 use p4os_sdk::gui::font::builtin::Fonts;
@@ -151,6 +151,19 @@ pub fn padlock(canvas: &mut Canvas, c: Point, size: i32, color: Color) {
 }
 
 pub(super) fn frame(lock: &mut Lock, canvas: &mut Canvas, input: &Input, fonts: &Fonts, theme: &Theme, sys: &mut dyn System) -> Option<u32> {
+    // The hash takes a noticeable fraction of a second on the board, so a
+    // submitted passcode is checked only after a frame saying so is shown.
+    match lock.checking {
+        Checking::Requested => lock.checking = Checking::Shown,
+        Checking::Shown => {
+            lock.checking = Checking::Idle;
+            lock.submit(sys);
+            if !lock.locked {
+                return Some(0);
+            }
+        }
+        Checking::Idle => {}
+    }
     let now = sys.uptime_ms();
     lock.throttle.refresh(sys);
     let wait = lock.throttle.remaining_ms(now);
@@ -195,7 +208,10 @@ pub(super) fn frame(lock: &mut Lock, canvas: &mut Canvas, input: &Input, fonts: 
     let (dots_r, keys_r) = rest.split_top(44);
     let keys_r = Rect::new(keys_r.x, keys_r.y + 8, keys_r.w, keys_r.h - 8);
     let since_wrong = lock.wrong_at.map(|w| now.saturating_sub(w));
-    let (msg, color) = if wait > 0 {
+    let checking = lock.checking != Checking::Idle;
+    let (msg, color) = if checking {
+        ("Checking...".into(), t.text)
+    } else if wait > 0 {
         (format!("Too many attempts. Try again in {}", fmt_wait(wait)), t.danger)
     } else if since_wrong.is_some_and(|e| e < WRONG_MS) {
         let left = throttle::ATTEMPTS_PER_LOCKOUT - lock.throttle.fails() % throttle::ATTEMPTS_PER_LOCKOUT;
@@ -219,7 +235,7 @@ pub(super) fn frame(lock: &mut Lock, canvas: &mut Canvas, input: &Input, fonts: 
         keys.push(k);
     }
     for k in keys {
-        if wait > 0 {
+        if wait > 0 || lock.checking != Checking::Idle {
             break;
         }
         match k {
@@ -229,14 +245,12 @@ pub(super) fn frame(lock: &mut Lock, canvas: &mut Canvas, input: &Input, fonts: 
                 lock.wrong_at = None;
             }
             PadKey::Back => lock.entry.pop(),
-            PadKey::Enter => lock.submit(sys),
-        }
-        if !lock.locked {
-            return Some(0);
+            PadKey::Enter if !lock.entry.is_empty() => lock.checking = Checking::Requested,
+            PadKey::Enter => {}
         }
     }
 
-    if input.pressed || input.released || !input.keys.is_empty() {
+    if checking || lock.checking != Checking::Idle || input.pressed || input.released || !input.keys.is_empty() {
         return Some(0);
     }
     match since_wrong {

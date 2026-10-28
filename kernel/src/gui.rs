@@ -165,8 +165,9 @@ fn poll_touch(input: &mut Input, o: Orientation) -> bool {
             };
             if !input.down {
                 input.pressed = true;
+                // Touch positions are not logged: on the passcode keypad they
+                // would spell out the passcode on the serial console.
                 input.press_pos = pos;
-                kprintln!("touch down raw ({}, {}) -> {:?} {:?}", p.x, p.y, o, pos);
             }
             input.delta = Point::new(pos.x - input.pos.x, pos.y - input.pos.y);
             input.pos = pos;
