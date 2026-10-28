@@ -171,7 +171,6 @@ impl BinaryWriter {
 /// Run `f` with the USB port to itself. Other threads' output waits until
 /// it returns (it must not print). Interrupt handlers and spinlock holders
 /// still print directly, so the stream needs its own framing and checksum.
-/// Not available while output is being captured for the Terminal app.
 pub fn binary_transfer<R>(stall_ms: u32, f: impl FnOnce(&mut BinaryWriter) -> R) -> R {
     let _out = OUTPUT.lock();
     let mut w = BinaryWriter { stall_ticks: stall_ms as u64 * 1000 * crate::systimer::TICKS_PER_US };
