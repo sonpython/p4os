@@ -289,6 +289,15 @@ pub trait System {
     }
     /// Store a persistent setting; it survives reboots.
     fn config_set(&mut self, _key: &str, _value: &str) {}
+    /// Fill `buf` from the OS random generator (salts, keys). Returns false
+    /// when no secure source exists; callers must then refuse the operation
+    /// rather than fall back to predictable data.
+    fn fill_random(&mut self, _buf: &mut [u8]) -> bool {
+        false
+    }
+    /// Lock the screen now if a passcode is configured. The desktop handles
+    /// this; the OS-level implementation does nothing.
+    fn lock_now(&mut self) {}
     /// Run `job` on its own low-priority thread, pinned to `core` when
     /// given (core 1 keeps heavy work such as video decoding off the core
     /// that runs the GUI). The thread ends when `job` returns. Fails when

@@ -11,7 +11,7 @@ Bộ test đo các mục sau:
 - yield;
 - mutex;
 - độ trễ ngắt và độ trễ từ ISR đến lúc thread chạy lại;
-- heap;
+- heap. Riêng p4os có thêm các hàng `heap frag N holes`: thời gian alloc/free khi heap có N lỗ trống. Bản FreeRTOS không có các hàng này. Hàng memcpy SRAM của p4os dùng 2 × 127 KiB thay vì 2 × 128 KiB, vì vùng SRAM 256 KiB phải chứa thêm header của khối;
 - memcpy;
 - CRC32 và một kernel số nguyên. Hai phép đo này không phụ thuộc OS.
 

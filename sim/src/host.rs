@@ -113,6 +113,9 @@ impl System for HostSystem {
         self.config.insert(key.into(), value.into());
     }
 
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
+    }
     fn spawn_worker(&mut self, name: &'static str, _core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
         let start = self.start;
         std::thread::Builder::new()

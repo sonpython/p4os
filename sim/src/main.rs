@@ -6,6 +6,7 @@
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
 //!   yt play ID [144|240|audio] | yt pause | yt seek N | yt stop | yt stat
+//!   config KEY VALUE (store a setting) | lock (lock the screen now)
 //!
 //! The screen starts in portrait (480x800); `--landscape` starts in 800x480.
 //!
@@ -151,6 +152,14 @@ impl Sim {
             Some("yt") => {
                 let c = p4os_ytplay::remote::parse_command(&cmd.trim_start()[2..]).unwrap_or_else(|e| panic!("`{cmd}`: {e}"));
                 assert!(p4os_ytplay::remote::post(c), "player command queue full");
+                self.frame();
+            }
+            Some("config") if parts.len() == 3 => {
+                self.sys.config_set(parts[1], parts[2]);
+                self.frame();
+            }
+            Some("lock") => {
+                self.desktop.lock_now(&mut self.sys);
                 self.frame();
             }
             Some("rotate") => {

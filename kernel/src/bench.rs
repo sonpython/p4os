@@ -13,7 +13,7 @@ use crate::{irq, kprintln, mmio, sched, soc, systimer};
 use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 const RUNS: usize = 5;
 /// Above every system thread, so only interrupts compete with the bench.
@@ -32,15 +32,26 @@ const IRQ_SAMPLES: u32 = 1_000;
 /// Alarm lead time: long enough for the waiter to block (or start spinning).
 const IRQ_LEAD_TICKS: u64 = 50 * systimer::TICKS_PER_US;
 const HEAP_OPS: u32 = 10_000;
+/// Fragmentation stress: number of free gaps left between live blocks.
+const FRAG_HOLES: [usize; 3] = [16, 256, 1024];
+const FRAG_OPS: u32 = 4_000;
 const MIB: usize = 1 << 20;
-const SRAM_COPY: usize = 128 * 1024;
+/// Two of these must fit the 256 KiB SRAM region together with their heap
+/// block headers, so 1 KiB short of half (ESP-IDF's version uses 128 KiB).
+const SRAM_COPY: usize = 127 * 1024;
 const CRC_BUF: usize = 64 * 1024;
 const INT_ITERS: u32 = 1_000_000;
 const SEED: u32 = 0x1234_5678;
 
 /// Systimer comparator 1 (comparator 0 drives the kernel tick).
 const ALARM_LINE: usize = 20;
+/// Kernel level, as in the FreeRTOS bench (its handler may use semaphores).
 const ALARM_LEVEL: u32 = 3;
+/// Level of the fast-interrupt rows, the display page-flip level: not masked
+/// by kernel critical sections, wakes threads only through `sched::notify`.
+const FAST_LEVEL: u32 = 6;
+const _: () = assert!(ALARM_LEVEL <= irq::KERNEL_LEVEL && FAST_LEVEL > irq::KERNEL_LEVEL);
+const CRIT_OPS: u32 = 100_000;
 const ST_CONF: usize = soc::SYSTIMER;
 const ST_TARGET1_HI: usize = soc::SYSTIMER + 0x24;
 const ST_TARGET1_LO: usize = soc::SYSTIMER + 0x28;
@@ -64,7 +75,12 @@ static ISR_TICKS: AtomicU32 = AtomicU32::new(0);
 static SPIN_CYCLES: AtomicU32 = AtomicU32::new(0);
 static ENTRY_CYCLES: AtomicU32 = AtomicU32::new(0);
 static FIRED: AtomicU32 = AtomicU32::new(0);
-static WAKE_THREAD: AtomicU32 = AtomicU32::new(0);
+/// How the alarm handler wakes the bench thread.
+static WAKE: AtomicU32 = AtomicU32::new(WAKE_NONE);
+const WAKE_NONE: u32 = 0;
+const WAKE_SEMAPHORE: u32 = 1;
+const WAKE_NOTIFY: u32 = 2;
+static BENCH_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 #[inline(always)]
 fn cycles() -> u32 {
@@ -101,14 +117,21 @@ fn runner(_: usize) {
     row("ctx switch (sem ping-pong)", "ns", repeat(pingpong));
     row("yield (2 equal-prio threads)", "ns", repeat(yield_pair));
     row("mutex lock+unlock (uncontended)", "ns", repeat(mutex_pair));
+    row("critical section, mstatus.MIE (in+out)", "ns", repeat(crit_mie));
+    row("critical section, CLIC threshold (in+out)", "ns", repeat(crit_threshold));
 
-    alarm_init();
+    BENCH_THREAD.store(sched::my_id(), Ordering::Relaxed);
+    alarm_init(ALARM_LEVEL);
     let mut idle = [[0f32; 4]; RUNS];
+    let mut ntf = [[0f32; 4]; RUNS];
     let mut busy = [[0f32; 2]; RUNS];
     for r in 0..RUNS {
-        idle[r] = irq_wake_run();
+        idle[r] = irq_wake_run(WAKE_SEMAPHORE);
+        ntf[r] = irq_wake_run(WAKE_NOTIFY);
         busy[r] = irq_busy_run();
     }
+    alarm_init(FAST_LEVEL);
+    let fast: [[f32; 4]; RUNS] = core::array::from_fn(|_| irq_wake_run(WAKE_NOTIFY));
     alarm_stop();
     row("irq latency avg (thread blocked)", "ns", column(&idle, 0));
     row("irq latency max (thread blocked)", "ns", column(&idle, 1));
@@ -116,10 +139,19 @@ fn runner(_: usize) {
     row("irq entry avg (cpu busy, mcycle)", "ns", column(&busy, 1));
     row("isr->thread wake avg (semaphore)", "ns", column(&idle, 2));
     row("isr->thread wake max (semaphore)", "ns", column(&idle, 3));
+    row("isr->thread wake avg (task notify)", "ns", column(&ntf, 2));
+    row("isr->thread wake max (task notify)", "ns", column(&ntf, 3));
+    row("fast irq latency avg (level 6, blocked)", "ns", column(&fast, 0));
+    row("fast irq latency max (level 6, blocked)", "ns", column(&fast, 1));
+    row("fast isr->thread wake avg (notify)", "ns", column(&fast, 2));
+    row("fast isr->thread wake max (notify)", "ns", column(&fast, 3));
 
     heap_row("heap alloc+free 32 B (sram)", 32, false);
     heap_row("heap alloc+free 1 KiB (sram)", 1024, false);
     heap_row("heap alloc+free 256 KiB (psram)", 256 * 1024, true);
+    for holes in FRAG_HOLES {
+        heap_frag_rows(holes);
+    }
 
     memcpy_rows();
     cpu_rows();
@@ -194,14 +226,36 @@ fn mutex_pair() -> f32 {
 
 // --- interrupt latency ---------------------------------------------------
 
-fn alarm_init() {
+/// Enter and leave a critical section that masks every interrupt.
+fn crit_mie() -> f32 {
+    let t0 = cycles();
+    for _ in 0..CRIT_OPS {
+        irq::free(|| black_box(()));
+    }
+    cycles_to_ns(cycles().wrapping_sub(t0)) / CRIT_OPS as f32
+}
+
+/// Enter and leave a kernel critical section (CLIC threshold raise), the
+/// masking part of every `SpinLock` lock/unlock.
+fn crit_threshold() -> f32 {
+    let t0 = cycles();
+    for _ in 0..CRIT_OPS {
+        let mask = irq::mask_kernel();
+        irq::unmask_kernel(black_box(mask));
+    }
+    cycles_to_ns(cycles().wrapping_sub(t0)) / CRIT_OPS as f32
+}
+
+/// Enable comparator 1 and route it to this core at `level` (calling it
+/// again just changes the level).
+fn alarm_init(level: u32) {
     irq::free(|| {
         mmio::write(ST_TARGET1_CONF, 0); // one-shot, compares with unit 0
         mmio::set_bits(ST_CONF, ST_TARGET1_WORK_EN);
         mmio::write(ST_INT_CLR, ST_TARGET1_INT);
         mmio::set_bits(ST_INT_ENA, ST_TARGET1_INT);
     });
-    irq::attach(soc::source::SYSTIMER_TARGET1, ALARM_LINE, ALARM_LEVEL, on_alarm);
+    irq::attach(soc::source::SYSTIMER_TARGET1, ALARM_LINE, level, on_alarm);
 }
 
 fn alarm_stop() {
@@ -213,12 +267,19 @@ fn alarm_stop() {
 }
 
 /// Arm comparator 1 `IRQ_LEAD_TICKS` ahead and return the deadline.
+///
+/// The comparator fires only when the counter equals the target, so a
+/// target already in the past never fires and the run would wait forever.
+/// Masking interrupts keeps handlers (or the other core parking this one
+/// for a flash write) from delaying the arm past the lead time.
 fn alarm_arm() -> u32 {
-    let deadline = systimer::now_ticks() + IRQ_LEAD_TICKS;
-    mmio::write(ST_TARGET1_HI, (deadline >> 32) as u32 & 0xF_FFFF);
-    mmio::write(ST_TARGET1_LO, deadline as u32);
-    mmio::write(ST_COMP1_LOAD, 1);
-    deadline as u32
+    irq::free(|| {
+        let deadline = systimer::now_ticks() + IRQ_LEAD_TICKS;
+        mmio::write(ST_TARGET1_HI, (deadline >> 32) as u32 & 0xF_FFFF);
+        mmio::write(ST_TARGET1_LO, deadline as u32);
+        mmio::write(ST_COMP1_LOAD, 1);
+        deadline as u32
+    })
 }
 
 fn on_alarm() {
@@ -229,20 +290,28 @@ fn on_alarm() {
     ISR_CYCLES.store(c, Ordering::Relaxed);
     ISR_TICKS.store(t, Ordering::Relaxed);
     FIRED.store(1, Ordering::Release);
-    if WAKE_THREAD.load(Ordering::Relaxed) != 0 {
-        ISR_SEM.release();
+    match WAKE.load(Ordering::Relaxed) {
+        WAKE_SEMAPHORE => ISR_SEM.release(),
+        WAKE_NOTIFY => sched::notify(BENCH_THREAD.load(Ordering::Relaxed), sched::notify_bits::BENCH),
+        _ => {}
     }
 }
 
-/// The bench thread blocks on a semaphore the alarm handler releases.
+/// The bench thread blocks on a semaphore the alarm handler releases, or
+/// waits for a notification it posts (`how`).
 /// Returns [avg irq latency, max irq latency, avg wake, max wake] in ns.
-fn irq_wake_run() -> [f32; 4] {
-    WAKE_THREAD.store(1, Ordering::Relaxed);
+fn irq_wake_run(how: u32) -> [f32; 4] {
+    WAKE.store(how, Ordering::Relaxed);
     let (mut lat_sum, mut lat_max, mut wake_sum, mut wake_max) = (0u64, 0u32, 0u64, 0u32);
     for _ in 0..IRQ_SAMPLES {
         let deadline = alarm_arm();
-        ISR_SEM.acquire();
+        if how == WAKE_SEMAPHORE {
+            ISR_SEM.acquire();
+        } else {
+            sched::wait_notify(sched::notify_bits::BENCH);
+        }
         let woke = cycles();
+
         let lat = ISR_TICKS.load(Ordering::Relaxed).wrapping_sub(deadline);
         let wake = woke.wrapping_sub(ISR_CYCLES.load(Ordering::Relaxed));
         lat_sum += lat as u64;
@@ -250,7 +319,7 @@ fn irq_wake_run() -> [f32; 4] {
         wake_sum += wake as u64;
         wake_max = wake_max.max(wake);
     }
-    WAKE_THREAD.store(0, Ordering::Relaxed);
+    WAKE.store(WAKE_NONE, Ordering::Relaxed);
     let n = IRQ_SAMPLES as f32;
     [
         ticks_to_ns(lat_sum as u32) / n,
@@ -302,6 +371,91 @@ fn heap_row(name: &str, size: usize, want_psram: bool) {
         }
         cycles_to_ns(cycles().wrapping_sub(t0)) / HEAP_OPS as f32
     }));
+}
+
+/// Random small block size, 16..=256 bytes in 16-byte steps.
+fn frag_layout(x: &mut u32) -> Layout {
+    Layout::from_size_align(16 + (xorshift(x) % 16) as usize * 16, 4).expect("valid layout")
+}
+
+/// One timed heap call with interrupts masked, so the figure is the
+/// allocator's own cost (plus any wait for the other core) rather than
+/// whatever interrupt happened to land in the window.
+fn timed<R>(f: impl FnOnce() -> R) -> (R, u32) {
+    irq::free(|| {
+        let t0 = cycles();
+        let r = black_box(f());
+        (r, cycles().wrapping_sub(t0))
+    })
+}
+
+/// Fragment the heap with `holes` free gaps between `holes` live blocks of
+/// mixed size, then replace random live blocks with new random-size ones,
+/// which keeps the fragmentation steady. Returns [alloc avg, alloc max,
+/// free max] in ns, or `None` if the heap ran out.
+fn heap_frag_run(holes: usize, seed: u32) -> Option<[f32; 3]> {
+    let mut x = seed;
+    let mut blocks: alloc::vec::Vec<(*mut u8, Layout)> = alloc::vec::Vec::with_capacity(2 * holes);
+    let release = |blocks: &mut alloc::vec::Vec<(*mut u8, Layout)>| {
+        for &(p, l) in blocks.iter() {
+            unsafe { dealloc(p, l) };
+        }
+        blocks.clear();
+    };
+    for _ in 0..2 * holes {
+        let l = frag_layout(&mut x);
+        let p = unsafe { alloc(l) };
+        if p.is_null() {
+            release(&mut blocks);
+            return None;
+        }
+        blocks.push((p, l));
+    }
+    // Free every other block: each leaves a gap its live neighbours pin.
+    let mut live = alloc::vec::Vec::with_capacity(holes);
+    for (i, &(p, l)) in blocks.iter().enumerate() {
+        if i % 2 == 1 { unsafe { dealloc(p, l) } } else { live.push((p, l)) }
+    }
+    blocks.clear();
+    let mut blocks = live;
+
+    let (mut alloc_sum, mut alloc_max, mut free_max) = (0u64, 0u32, 0u32);
+    let mut ok = true;
+    for _ in 0..FRAG_OPS {
+        let j = xorshift(&mut x) as usize % blocks.len();
+        let (p, l) = blocks[j];
+        let ((), dt) = timed(|| unsafe { dealloc(p, l) });
+        free_max = free_max.max(dt);
+        let l = frag_layout(&mut x);
+        let (p, dt) = timed(|| unsafe { alloc(l) });
+        alloc_sum += dt as u64;
+        alloc_max = alloc_max.max(dt);
+        if p.is_null() {
+            blocks.swap_remove(j);
+            ok = false;
+            break;
+        }
+        blocks[j] = (p, l);
+    }
+    release(&mut blocks);
+    ok.then(|| [cycles_to_ns((alloc_sum / FRAG_OPS as u64) as u32), cycles_to_ns(alloc_max), cycles_to_ns(free_max)])
+}
+
+fn heap_frag_rows(holes: usize) {
+    let mut runs = [[0f32; 3]; RUNS];
+    for (r, out) in runs.iter_mut().enumerate() {
+        match heap_frag_run(holes, SEED.wrapping_add(r as u32)) {
+            Some(v) => *out = v,
+            None => {
+                kprintln!("heap frag {} holes: allocation failed", holes);
+                return;
+            }
+        }
+    }
+    let name = |what: &str| alloc::format!("heap frag {} holes: {}", holes, what);
+    row(&name("alloc avg"), "ns", column(&runs, 0));
+    row(&name("alloc max"), "ns", column(&runs, 1));
+    row(&name("free max"), "ns", column(&runs, 2));
 }
 
 // --- memory and CPU kernels (OS independent) ------------------------------
@@ -368,7 +522,7 @@ fn copy_mib(src: &Buf, dst: &mut Buf) -> f32 {
 
 fn memcpy_rows() {
     match (Buf::new(SRAM_COPY, true), Buf::new(SRAM_COPY, true)) {
-        (Some(src), Some(mut dst)) => row("memcpy sram->sram (128 KiB x8)", "MB/s", repeat(|| copy_mib(&src, &mut dst))),
+        (Some(src), Some(mut dst)) => row("memcpy sram->sram (127 KiB x8)", "MB/s", repeat(|| copy_mib(&src, &mut dst))),
         _ => kprintln!("memcpy sram->sram: not enough SRAM for 2 x {} KiB", SRAM_COPY / 1024),
     }
     match (Buf::new(MIB, false), Buf::new(MIB, false)) {

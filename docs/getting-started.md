@@ -17,6 +17,7 @@ p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x*
 | Reset board và xem console | `python3 scripts/monitor.py [giây]` |
 | Giữ quyền dùng board riêng khi nhiều tiến trình chạy song song | `scripts/board-lock.sh <lệnh>` |
 | Reset, gửi lệnh shell rồi in phản hồi | `python3 scripts/shell-session.py ps mem demo` |
+| Chạy test trên máy host (gồm test của allocator TLSF) | `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-tlsf --target aarch64-unknown-linux-gnu` |
 
 Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`).
 
@@ -53,7 +54,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi và mã khoá màn hình chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -68,9 +69,22 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
 
 - Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
-- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
 - Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
 - Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
+
+## Màn hình khoá
+
+| Màn hình khoá | Nhập sai | Bị khoá tạm | Ngang |
+|---|---|---|---|
+| ![](screenshots/lock-portrait.png) | ![](screenshots/lock-wrong.png) | ![](screenshots/lock-lockout.png) | ![](screenshots/lock-landscape.png) |
+
+- Bật trong Settings > Security: công tắc **Lock screen**, nút **Set passcode** (hoặc **Change** / **Remove** khi đã có mã), và **Auto-lock**: `Screen off` (mặc định), `1 min`, `5 min`, `Never`. Mã là 4–8 chữ số, nhập hai lần để xác nhận. Bật công tắc khi chưa có mã thì sẽ chuyển sang bước đặt mã; đổi mã, xoá mã hay tắt khoá đều phải nhập mã hiện tại.
+- Màn hình khoá chỉ hoạt động khi đã bật **và** đã có mã. Nó hiện lúc khởi động, khi chạm biểu tượng ổ khoá trên thanh trạng thái (hoặc lệnh `lock now`), và tự khoá theo Auto-lock. Chừng nào phần quản lý nguồn chưa báo sự kiện tắt màn hình, chế độ `Screen off` tạm dùng mốc 1 phút không chạm. `1 min` / `5 min` tính từ lần chạm cuối.
+- Khi khoá, không phần nào của app hay thanh trạng thái được vẽ và không app nào nhận chạm; app vẫn chạy nền (ví dụ nhạc vẫn phát). Lần chạm đánh thức màn hình không được tính là phím.
+- Mã không bao giờ được lưu dạng rõ: `lock.pin` chứa `v1$<số vòng>$<salt>$<hash>`, là PBKDF2-HMAC-SHA256 với salt ngẫu nhiên 16 byte lấy từ bộ sinh số ngẫu nhiên của chip, 10 000 vòng; so sánh hash theo thời gian hằng. Mã và hash không bao giờ được in ra serial. Trên board (360 MHz, SHA-256 bằng phần mềm) một lần kiểm tra mất khoảng 305 ms (`lock bench`); màn hình khoá hiện "Checking..." trong lúc đó.
+- Giới hạn thử: sau 5 lần sai bị khoá 30 giây, mỗi 5 lần sai tiếp theo thời gian gấp đôi (60 s, 120 s, …), tối đa 15 phút. Số lần sai (`lock.fails`) và lần khoá đang chờ (`lock.until`) được lưu trong flash nên khởi động lại không xoá được: nếu đồng hồ đã đặt, thời điểm hết khoá được giữ nguyên; nếu chưa, lần khoá bắt đầu lại từ đầu sau khi khởi động. Nhập sai mã hiện tại trong Settings cũng bị tính và có thể khoá màn hình.
+- **Quên mã**: trên console serial gõ `lock reset`, rồi `lock reset CLEAR-PASSCODE`. Lệnh xoá mã, tắt khoá và xoá bộ đếm. Lệnh này bị từ chối khi chạy từ app Terminal. Giới hạn cần nói rõ: console serial (cổng USB) được coi là giao diện tin cậy, nên ai cầm được board và cắm cáp đều mở được khoá. Ngoài ra flash không mã hoá, nên người có quyền truy cập vật lý có thể đọc hash và dò mã ngoại tuyến (mã 4–8 chữ số có ít khả năng). Màn hình khoá chống người lạ dùng màn hình cảm ứng, không chống người có cáp và thời gian.
 
 ## App user (U-mode, cách ly bằng PMP)
 
@@ -107,12 +121,29 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - Lúc nhảy vào kernel, ROM chạy core 1 trên stack riêng ngay dưới 0x4FF3EFC0. Vùng này nằm trên `_heap_end`, nên heap không bị ghi đè.
 - CLIC của từng core nằm ở cùng địa chỉ 0x20800000, và mỗi core có ma trận ngắt riêng. `irq::attach` gắn ngắt vào core đang gọi. Tick 1 kHz chạy trên core 0 và tính giờ cho cả hai core.
 - Ngắt liên core (IPI) dùng nguồn FROM_CPU 79 + hart, gắn vào đường CLIC 47 (driver lấy đường từ 16 trở lên, `bench` dùng đường 20). Ghi 1 vào `HP_SYS + 0x10 + 4·hart` để báo, bên nhận ghi 0 để xoá.
-- Scheduler, heap, `Semaphore`/`Mutex`, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): tắt ngắt trên core hiện tại rồi chờ một atomic LR/SC. `irq::free` chỉ chặn được core hiện tại. Spinlock phải là biến static trong SRAM.
+- Scheduler, heap, thao tác cache, MMU flash, bộ sinh số ngẫu nhiên và các lệnh đọc-sửa-ghi thanh ghi (`mmio::set_bits`/`clear_bits`/`modify`) dùng spinlock (`kernel/src/spin.rs`): nâng ngưỡng CLIC để chặn ngắt mức kernel trên core hiện tại (xem mục dưới), rồi chờ một atomic LR/SC. `Semaphore`/`Mutex` chỉ vào scheduler khi phải chờ hoặc khi có thread đang chờ; lấy và trả khi không tranh chấp chỉ là atomic. `irq::free` chặn mọi ngắt nhưng chỉ trên core hiện tại. Spinlock phải là biến static trong SRAM.
 - Console không giữ ngắt tắt trong lúc chờ USB rút FIFO (có thể mất ~1 ms): các thread xếp hàng bằng một `Mutex`; trình xử lý ngắt và code đang giữ spinlock in thẳng ra.
 - Ghi/xoá flash tạm dừng cache, mà core kia vẫn chạy code từ flash qua cache đó. Vì vậy `smp::with_other_core_parked` gửi IPI để core kia vào một vòng lặp nằm trong SRAM (`.sram_text`, ngắt tắt, stack ngắt ở SRAM), chờ nó báo đã vào rồi mới tạm dừng cache. Trong lúc xoá một sector (~45 ms) ngắt bị tắt, nên `irq` sau khi lưu cài đặt báo độ trễ tick cỡ 48 ms; ngoài lúc đó độ trễ dưới 50 µs.
 - `mcycle` là bộ đếm riêng của từng core (core 1 bắt đầu đếm muộn hơn khoảng 1 giây), nên `bench` ghim mọi thread của nó vào core 0.
 - `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
+
+## Ngắt: mức kernel, mức nhanh và task notification
+
+- Mức 1..3 (`irq::KERNEL_LEVEL`) là **mức kernel**: handler được dùng spinlock, `Semaphore::release`, `sched::notify`. Critical section của kernel (mọi `SpinLock`) chỉ nâng ngưỡng CLIC (`0x20800008`) lên mức 3 thay vì tắt `mstatus.MIE`, nên ngắt mức 4..7 vẫn chạy khi thread đang giữ lock.
+- Mức 4..7 là **mức nhanh**: màn hình (page flip, mức 6) và audio (DMA xong, mức 5). Handler mức nhanh **không được lấy lock nào** (spinlock, semaphore, mutex, cấp phát, `mmio::set_bits`/`modify`): chỉ đọc/ghi thanh ghi, atomic và gọi `sched::notify`. Nếu code bị ngắt đang trong critical section, `notify` để việc đánh thức lại cho IPI tự gửi tới chính core đó (mức 1), chạy ngay khi critical section kết thúc.
+- Trap không lồng nhau: ngắt nhanh vẫn phải chờ handler đang chạy. Nó chỉ không còn phải chờ critical section phía thread.
+- `sched::notify(id, bits)` / `sched::wait_notify(mask)`: mỗi thread có 32 bit notification, đánh thức đúng một thread với tối đa một lần lấy scheduler lock. Bit dùng chung khai báo ở `sched::notify_bits`. Màn hình, audio và console RX dùng cơ chế này thay cho semaphore.
+- Chi phí đo bằng `bench`: vào+ra critical section bằng ngưỡng CLIC mất ~151 ns, so với ~53 ns khi bật/tắt `MIE` (ghi thanh ghi rồi đọc lại để ngưỡng có hiệu lực). `Semaphore`/`Mutex` không tranh chấp chỉ dùng atomic (mutex lock+unlock ~365 ns, trước đây ~620 ns).
+- `irq::attach` báo lỗi nếu đường CLIC đã có handler khác (lỗi cũ: IPI và alarm của `bench` dùng chung đường 20 làm `bench` treo).
 - `smpdemo` đo được 1 thread 1116 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 2 lần. `config stress 50` chạy song song với tải trên cả hai core: 100 lần lưu đều đúng và không treo.
+
+## Heap
+
+- Mỗi vùng nhớ (SRAM, PSRAM) có một allocator TLSF riêng (crate `tlsf/`, gọi từ `kernel/src/heap.rs`), mỗi vùng một spinlock. Alloc và free chạy trong thời gian hằng, nên thời gian giữ lock (có che ngắt) ngắn và có cận trên, dù heap phân mảnh đến đâu. Khối nhỏ hơn 64 KiB vào SRAM trước, khối lớn vào PSRAM trước, vùng kia dùng làm dự phòng khi hết chỗ.
+- Mỗi khối có header 8 byte và được làm tròn lên bội số 16 byte. Vì thế vùng SRAM 256 KiB không còn chứa vừa đúng hai khối 128 KiB (`bench` copy SRAM dùng 2 × 127 KiB).
+- **Không được dùng heap trong trình xử lý ngắt.** Mọi lối vào heap đều kiểm tra stack pointer; nếu đang ở stack ngắt thì panic với thông báo `heap used from interrupt context`. Trong ngữ cảnh ngắt, console in thẳng ra USB thay vì ghi vào bộ đệm capture, nên Ctrl-T và thông báo lỗi không cấp phát.
+- Stack của thread cỡ 2/4/8/16/24/32/48 KiB lấy từ pool riêng của từng cỡ. Khi thread thoát, stack của nó được giữ lại trong pool cho thread sau cùng cỡ, thay vì trả về heap, nên spawn/thoát thread liên tục không làm SRAM bị thủng lỗ chỗ. `mem` in số stack đang nằm chờ trong pool. Phần bộ nhớ này vẫn được tính là đã dùng.
+- Đo bằng `bench` (thời gian một lần alloc, ngắt bị che trong lúc đo, heap có N lỗ trống xen giữa các khối còn sống). Với N = 16/256/1024, thời gian tối đa là 1,08/1,12/1,15 µs. Allocator first-fit cũ cần 0,82/4,2/12,8 µs cho alloc và tới 23,7 µs cho free. Trên heap sạch, một cặp alloc+free 32 B mất 1,26 µs (first-fit cũ: 0,60 µs). Đây là cái giá để đổi lấy cận trên.
 
 ## Màn hình: những điều đã kiểm chứng
 

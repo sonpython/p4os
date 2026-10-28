@@ -6,10 +6,11 @@
 //! audio thread refills each buffer when the DMA reports it finished, and
 //! pulls PCM from the active `AudioSource`.
 
-use crate::sync::{Mutex, Semaphore};
+use crate::sched::notify_bits;
+use crate::sync::Mutex;
 use crate::{gpio, i2c, irq, kprintln, mmio, sched, soc};
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use p4os_sdk::{AudioSource, PlaybackState};
 
 const I2S1: usize = soc::HPPERIPH1 + 0x7000;
@@ -28,7 +29,10 @@ const SIG_SD: u32 = 34;
 
 const CODEC: u8 = 0x18;
 const IRQ_LINE: usize = 19;
+/// Fast interrupt (see `irq`): it only acknowledges the DMA and notifies
+/// the audio thread, so thread-side critical sections never delay a refill.
 const IRQ_LEVEL: u32 = 5;
+const _: () = assert!(IRQ_LEVEL > irq::KERNEL_LEVEL);
 const DMA_PERI_I2S1: u32 = 4;
 const XTAL_HZ: u32 = 40_000_000;
 
@@ -47,7 +51,9 @@ struct Ring {
 
 static mut RING: Ring = Ring { desc: [[0; 3]; DESCRIPTORS], _pad: [0; 4], bufs: [[0; BUF_BYTES]; DESCRIPTORS] };
 
-static BUFFER_DONE: Semaphore = Semaphore::new(0);
+/// Thread refilling the ring, notified on every DMA EOF.
+static AUDIO_THREAD: AtomicUsize = AtomicUsize::new(NO_THREAD);
+const NO_THREAD: usize = usize::MAX;
 static SOURCE: Mutex<Option<Box<dyn AudioSource>>> = Mutex::new(None);
 static PLAYING: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
@@ -229,7 +235,10 @@ fn dma_init() {
 fn on_dma_eof() {
     mmio::write(AHB_DMA + 0x3C, mmio::read(AHB_DMA + 0x34));
     EOF_COUNT.fetch_add(1, Ordering::Relaxed);
-    BUFFER_DONE.release();
+    let thread = AUDIO_THREAD.load(Ordering::Acquire);
+    if thread != NO_THREAD {
+        sched::notify(thread, notify_bits::AUDIO_DMA);
+    }
 }
 
 pub fn init() {
@@ -252,8 +261,11 @@ fn finished_descriptor() -> usize {
 
 fn audio_thread(_: usize) {
     let mut pcm = alloc::vec![0i16; FRAMES_PER_BUF * 2];
+    AUDIO_THREAD.store(sched::my_id(), Ordering::Release);
     loop {
-        BUFFER_DONE.acquire();
+        // If the thread fell behind, one wake-up stands for several
+        // finished buffers; only the latest is refilled.
+        sched::wait_notify(notify_bits::AUDIO_DMA);
         let idx = finished_descriptor();
         let mut filled = 0;
         if PLAYING.load(Ordering::Acquire) && !PAUSED.load(Ordering::Relaxed) {
