@@ -37,4 +37,5 @@ pub static APPS: &[AppInfo] = &[
     clock::INFO,
     paint::INFO,
     game2048::INFO,
+    p4os_ytplay::app::INFO,
 ];

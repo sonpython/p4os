@@ -31,6 +31,14 @@ pub trait App {
 
     /// Called when the user leaves the app; release audio, etc.
     fn on_close(&mut self, _sys: &mut dyn System) {}
+
+    /// Take the whole screen this frame, without the status and title
+    /// bars (video playback). The app then needs its own way out:
+    /// `System::launch("")` returns to the home screen, and the Escape key
+    /// still works.
+    fn fullscreen(&self) -> bool {
+        false
+    }
 }
 
 /// Static description of an installed app, used by the launcher.
@@ -110,6 +118,40 @@ pub trait Audio {
 
 pub type FetchId = u32;
 
+/// An HTTP request for [`Network::request`]. Header names and values must
+/// not contain CR or LF; the network layer rejects requests that do.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HttpRequest {
+    /// "GET", "POST", ...
+    pub method: String,
+    pub url: String,
+    /// Extra headers; `Host`, `Connection` and `Content-Length` are added
+    /// by the network layer.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub fn get(url: &str) -> Self {
+        Self { method: "GET".into(), url: url.into(), ..Self::default() }
+    }
+
+    pub fn post(url: &str, content_type: &str, body: Vec<u8>) -> Self {
+        Self { method: "POST".into(), url: url.into(), body, ..Self::default() }.header("Content-Type", content_type)
+    }
+
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Ask for bytes `start..=end` of the resource (HTTP status 206).
+    pub fn range(self, start: u64, end: u64) -> Self {
+        let value = alloc::format!("bytes={start}-{end}");
+        self.header("Range", &value)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum FetchState {
     Pending,
@@ -123,6 +165,9 @@ pub trait Network {
     fn is_up(&self) -> bool;
     /// Start an HTTP GET in the background.
     fn fetch(&mut self, url: &str) -> FetchId;
+    /// Start an HTTP request with a method, headers and body in the
+    /// background. Redirects are followed for GET and HEAD only.
+    fn request(&mut self, req: HttpRequest) -> FetchId;
     /// Current state of a fetch. Once `Done` or `Failed` has been
     /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
@@ -200,6 +245,17 @@ impl Orientation {
     }
 }
 
+/// Services for code running on a worker thread from [`System::spawn_worker`].
+pub trait Worker {
+    /// Block the calling worker thread for at least `ms` milliseconds.
+    fn sleep_ms(&self, ms: u32);
+    /// Microseconds since boot, for timing work.
+    fn now_us(&self) -> u64;
+}
+
+/// Body of a worker thread.
+pub type WorkerJob = Box<dyn FnOnce(&dyn Worker) + Send>;
+
 /// OS services available to apps.
 pub trait System {
     fn uptime_ms(&self) -> u64;
@@ -233,4 +289,11 @@ pub trait System {
     }
     /// Store a persistent setting; it survives reboots.
     fn config_set(&mut self, _key: &str, _value: &str) {}
+    /// Run `job` on its own low-priority thread, pinned to `core` when
+    /// given (core 1 keeps heavy work such as video decoding off the core
+    /// that runs the GUI). The thread ends when `job` returns. Fails when
+    /// the OS has no free thread slot or does not support workers.
+    fn spawn_worker(&mut self, _name: &'static str, _core: Option<usize>, _stack_size: usize, _job: WorkerJob) -> Result<(), String> {
+        Err("worker threads are not supported here".into())
+    }
 }

@@ -361,5 +361,9 @@ impl System for KernelSystem {
             kprintln!("config: saving {} failed: {:?}", key, e);
         }
     }
+
+    fn spawn_worker(&mut self, name: &'static str, core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        crate::worker::spawn(name, core, stack_size, job)
+    }
 }
 

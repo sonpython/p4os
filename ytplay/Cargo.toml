@@ -1,0 +1,12 @@
+[package]
+name = "p4os-ytplay"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "On-device YouTube playback engine for p4os: InnerTube stream lookup, ranged fetches, WebM/fMP4 demux, Opus and H.264 decode, player view"
+
+[dependencies]
+p4os-sdk = { path = "../sdk" }
+libm = "0.2"
+opus-rs = { version = "=0.1.40", default-features = false, features = ["libm"] }
+rusty_h264-decoder = { path = "../third_party/rusty_h264/decoder", features = ["libm"] }

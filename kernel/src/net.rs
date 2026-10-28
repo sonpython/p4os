@@ -11,7 +11,7 @@ use crate::{kprintln, rtc, sched, time, wifi};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use p4os_net::http::{self, Url};
 use p4os_net::sntp;
 use p4os_net::tls::{self, ClientConfig, TlsClient};
-use p4os_sdk::{FetchId, FetchState};
+use p4os_sdk::{FetchId, FetchState, HttpRequest};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{dhcpv4, dns, tcp, udp};
@@ -42,7 +42,7 @@ const SNTP_RESYNC_MS: u32 = 6 * 3600 * 1000;
 static STARTED: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static IP: Mutex<Option<Ipv4Address>> = Mutex::new(None);
-static REQUESTS: Mutex<VecDeque<(FetchId, String)>> = Mutex::new(VecDeque::new());
+static REQUESTS: Mutex<VecDeque<(FetchId, HttpRequest)>> = Mutex::new(VecDeque::new());
 static RESULTS: Mutex<BTreeMap<FetchId, FetchState>> = Mutex::new(BTreeMap::new());
 
 struct WifiDevice;
@@ -116,9 +116,14 @@ pub fn ip() -> Option<Ipv4Address> {
 }
 
 pub fn fetch(url: &str) -> FetchId {
+    request(HttpRequest::get(url))
+}
+
+/// Queue an HTTP request with method, headers and body.
+pub fn request(req: HttpRequest) -> FetchId {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     RESULTS.lock().insert(id, FetchState::Pending);
-    REQUESTS.lock().push_back((id, url.to_string()));
+    REQUESTS.lock().push_back((id, req));
     id
 }
 
@@ -141,8 +146,8 @@ fn tls_clock() -> Option<u64> {
 enum Stage {
     Resolve(dns::QueryHandle),
     Connect(SocketHandle),
-    /// Plain HTTP: raw response bytes so far.
-    Plain(SocketHandle, Vec<u8>),
+    /// Plain HTTP: request bytes not sent yet, raw response bytes so far.
+    Plain(SocketHandle, Vec<u8>, Vec<u8>),
     /// HTTPS: the TLS session and the decrypted response so far.
     Tls(SocketHandle, Box<TlsClient>, Vec<u8>),
 }
@@ -151,7 +156,7 @@ impl Stage {
     fn socket(&self) -> Option<SocketHandle> {
         match self {
             Stage::Resolve(_) => None,
-            Stage::Connect(h) | Stage::Plain(h, _) | Stage::Tls(h, _, _) => Some(*h),
+            Stage::Connect(h) | Stage::Plain(h, _, _) | Stage::Tls(h, _, _) => Some(*h),
         }
     }
 
@@ -168,6 +173,7 @@ impl Stage {
 
 struct Job {
     id: FetchId,
+    req: HttpRequest,
     target: Url,
     redirects: u32,
     stage: Stage,
@@ -240,8 +246,8 @@ fn run(mac_lo: usize) {
             // the first page after boot does not fail certificate checks.
             let hold_https = rtc::unix_now().is_none() && elapsed_ms(configured_at) < CLOCK_WAIT_MS;
             loop {
-                let Some((id, url)) = REQUESTS.lock().pop_front() else { break };
-                let target = match Url::parse(&url) {
+                let Some((id, req)) = REQUESTS.lock().pop_front() else { break };
+                let target = match Url::parse(&req.url) {
                     Ok(t) => t,
                     Err(e) => {
                         finish(id, FetchState::Failed(e));
@@ -249,11 +255,11 @@ fn run(mac_lo: usize) {
                     }
                 };
                 if target.https && hold_https {
-                    REQUESTS.lock().push_front((id, url));
+                    REQUESTS.lock().push_front((id, req));
                     break;
                 }
                 match net.resolve(&target) {
-                    Ok(stage) => jobs.push(Job { id, target, redirects: 0, stage, started: time::ticks(), tls_started: 0 }),
+                    Ok(stage) => jobs.push(Job { id, req, target, redirects: 0, stage, started: time::ticks(), tls_started: 0 }),
                     Err(e) => finish(id, FetchState::Failed(e)),
                 }
             }
@@ -336,7 +342,8 @@ impl Net {
                 return false;
             }
         };
-        if response.is_redirect() && job.redirects < http::MAX_REDIRECTS {
+        let may_redirect = matches!(job.req.method.as_str(), "GET" | "HEAD");
+        if may_redirect && response.is_redirect() && job.redirects < http::MAX_REDIRECTS {
             let next = job.target.resolve(response.location.as_deref().unwrap_or("/"));
             match Url::parse(&next).and_then(|t| Ok((self.resolve(&t)?, t))) {
                 Ok((stage, target)) => {
@@ -378,14 +385,15 @@ impl Net {
                 let h = *h;
                 let sock = self.sockets.get_mut::<tcp::Socket>(h);
                 if sock.may_send() {
+                    let bytes = match job.target.request_with(&job.req.method, &job.req.headers, &job.req.body) {
+                        Ok(b) => b,
+                        Err(e) => return Step::Failed(e),
+                    };
                     if !job.target.https {
-                        let _ = sock.send_slice(&job.target.request());
-                        job.stage = Stage::Plain(h, Vec::new());
+                        job.stage = Stage::Plain(h, bytes, Vec::new());
                         return Step::Continue;
                     }
-                    let client = self
-                        .tls_config()
-                        .and_then(|cfg| TlsClient::new(cfg, &job.target.host, job.target.request()));
+                    let client = self.tls_config().and_then(|cfg| TlsClient::new(cfg, &job.target.host, bytes));
                     match client {
                         Ok(c) => {
                             job.tls_started = time::ticks();
@@ -400,13 +408,27 @@ impl Net {
                     Step::Continue
                 }
             }
-            Stage::Plain(h, raw) => {
+            Stage::Plain(h, tx, raw) => {
                 let sock = self.sockets.get_mut::<tcp::Socket>(*h);
+                if !tx.is_empty() && sock.can_send() {
+                    match sock.send_slice(tx) {
+                        Ok(n) => {
+                            tx.drain(..n);
+                        }
+                        Err(e) => return Step::Failed(format!("send: {:?}", e)),
+                    }
+                }
                 while sock.can_recv() {
                     let _ = sock.recv(|d| {
                         raw.extend_from_slice(d);
                         (d.len(), ())
                     });
+                }
+                // Done when the server closes, or once the declared length
+                // arrived (some servers keep the connection open).
+                if let Some(n) = http::complete_len(raw) {
+                    raw.truncate(n);
+                    return Step::Response(core::mem::take(raw));
                 }
                 if !sock.may_recv() || !sock.is_open() {
                     Step::Response(core::mem::take(raw))
@@ -435,6 +457,12 @@ impl Net {
                     );
                 }
                 plain.extend(client.take_plaintext());
+                if !client.is_handshaking()
+                    && let Some(n) = http::complete_len(plain)
+                {
+                    plain.truncate(n);
+                    return Step::Response(core::mem::take(plain));
+                }
                 let out = client.pending_output();
                 if !out.is_empty() && sock.can_send() {
                     match sock.send_slice(out) {
@@ -575,6 +603,10 @@ impl p4os_sdk::Network for WifiNet {
 
     fn fetch(&mut self, url: &str) -> FetchId {
         fetch(url)
+    }
+
+    fn request(&mut self, req: HttpRequest) -> FetchId {
+        request(req)
     }
 
     fn poll(&mut self, id: FetchId) -> FetchState {

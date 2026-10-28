@@ -18,6 +18,7 @@ p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
 p4os-abi = { path = "../abi" }
 p4os-net = { path = "../net" }
+p4os-ytplay = { path = "../ytplay" }
 # Strong memcpy/memmove/memset/memcmp/bcmp overriding compiler_builtins' weak ones.
 p4os-mem = { path = "../mem" }
 # rustls-rustcrypto draws randomness through getrandom 0.2; the kernel

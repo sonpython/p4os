@@ -8,4 +8,5 @@ description = "Desktop shell and built-in apps for p4os"
 [dependencies]
 p4os-sdk = { path = "../sdk" }
 p4os-media = { path = "../media" }
+p4os-ytplay = { path = "../ytplay" }
 libm = "0.2"

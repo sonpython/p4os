@@ -112,6 +112,30 @@ impl System for HostSystem {
     fn config_set(&mut self, key: &str, value: &str) {
         self.config.insert(key.into(), value.into());
     }
+
+    fn spawn_worker(&mut self, name: &'static str, _core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        let start = self.start;
+        std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(stack_size.max(64 * 1024))
+            .spawn(move || job(&HostWorker { start }))
+            .map(|_| ())
+            .map_err(|e| format!("cannot start {name}: {e}"))
+    }
+}
+
+struct HostWorker {
+    start: Instant,
+}
+
+impl Worker for HostWorker {
+    fn sleep_ms(&self, ms: u32) {
+        std::thread::sleep(Duration::from_millis(ms as u64));
+    }
+
+    fn now_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
 }
 
 pub fn datetime_from_unix(secs: u64) -> DateTime {
@@ -310,34 +334,43 @@ impl Network for HostNet {
     }
 
     fn fetch(&mut self, url: &str) -> FetchId {
+        self.request(HttpRequest::get(url))
+    }
+
+    fn request(&mut self, req: HttpRequest) -> FetchId {
         self.next += 1;
         let slot = Arc::new(Mutex::new(FetchState::Pending));
         self.fetches.insert(self.next, slot.clone());
-        let url = url.to_string();
         std::thread::spawn(move || {
-            let result = http_get(&url);
+            let result = http_request(req);
             *slot.lock().unwrap() = result;
         });
         self.next
     }
 
     fn poll(&mut self, id: FetchId) -> FetchState {
-        self.fetches.get(&id).map_or(FetchState::Failed("unknown request".into()), |s| s.lock().unwrap().clone())
+        // Like the board, a finished result is handed out once.
+        let state = self.fetches.get(&id).map_or(FetchState::Failed("unknown request".into()), |s| s.lock().unwrap().clone());
+        if !matches!(state, FetchState::Pending) {
+            self.fetches.remove(&id);
+        }
+        state
     }
 }
 
-/// HTTP/1.0 GET over http:// or https://, following redirects.
-fn http_get(url: &str) -> FetchState {
-    let mut url = url.to_string();
+/// HTTP/1.0 request over http:// or https://, following redirects for GET.
+fn http_request(mut req: HttpRequest) -> FetchState {
     let mut redirects = 0;
+    let may_redirect = matches!(req.method.as_str(), "GET" | "HEAD");
     loop {
-        let response = Url::parse(&url).and_then(|target| {
-            let raw = if target.https { tls_exchange(&target)? } else { plain_exchange(&target)? };
+        let response = Url::parse(&req.url).and_then(|target| {
+            let bytes = target.request_with(&req.method, &req.headers, &req.body)?;
+            let raw = if target.https { tls_exchange(&target, bytes)? } else { plain_exchange(&target, &bytes)? };
             Ok((target, http::parse_response(&raw)?))
         });
         match response {
-            Ok((target, r)) if r.is_redirect() && redirects < http::MAX_REDIRECTS => {
-                url = target.resolve(r.location.as_deref().unwrap_or("/"));
+            Ok((target, r)) if may_redirect && r.is_redirect() && redirects < http::MAX_REDIRECTS => {
+                req.url = target.resolve(r.location.as_deref().unwrap_or("/"));
                 redirects += 1;
             }
             Ok((_, r)) => return FetchState::Done { status: r.status, content_type: r.content_type, body: r.body },
@@ -354,24 +387,31 @@ fn connect(target: &Url) -> Result<TcpStream, String> {
 }
 
 /// Send the request and read the raw response until the server closes.
-fn plain_exchange(target: &Url) -> Result<Vec<u8>, String> {
+fn plain_exchange(target: &Url, request: &[u8]) -> Result<Vec<u8>, String> {
     let mut stream = connect(target)?;
-    stream.write_all(&target.request()).map_err(|e| format!("send: {e}"))?;
+    stream.write_all(request).map_err(|e| format!("send: {e}"))?;
     let mut raw = Vec::new();
-    match stream.read_to_end(&mut raw) {
-        Err(e) if raw.is_empty() => Err(format!("read: {e}")),
-        _ => Ok(raw),
+    let mut buf = vec![0u8; 16 * 1024];
+    // Until the server closes or the declared length has arrived.
+    while http::complete_len(&raw).is_none() {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e) if raw.is_empty() => return Err(format!("read: {e}")),
+            Err(_) => break,
+        }
     }
+    Ok(raw)
 }
 
 /// The same exchange through TLS, verified against the Mozilla roots.
-fn tls_exchange(target: &Url) -> Result<Vec<u8>, String> {
+fn tls_exchange(target: &Url, request: Vec<u8>) -> Result<Vec<u8>, String> {
     static CONFIG: OnceLock<Result<Arc<tls::ClientConfig>, String>> = OnceLock::new();
     let config = CONFIG
         .get_or_init(|| tls::client_config(|| SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())))
         .clone()?;
     let mut stream = connect(target)?;
-    let mut client = TlsClient::new(config, &target.host, target.request())?;
+    let mut client = TlsClient::new(config, &target.host, request)?;
     let mut raw = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
     loop {
@@ -395,6 +435,10 @@ fn tls_exchange(target: &Url) -> Result<Vec<u8>, String> {
         client.push_received(&buf[..n]);
         client.process()?;
         raw.extend(client.take_plaintext());
+        // Servers may keep the connection open despite Connection: close.
+        if http::complete_len(&raw).is_some() {
+            break;
+        }
     }
     raw.extend(client.take_plaintext());
     Ok(raw)

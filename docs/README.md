@@ -22,7 +22,8 @@ Status: working on real hardware, under active development. Built as a learning 
 | Audio | I2S + ES8311 codec + DMA ring (verified electrically; no speaker fitted) |
 | Network | ESP32-C6 over SDIO running ESP-Hosted v2: Wi-Fi STA, DHCP, DNS, SNTP, TCP and HTTP/1.0 via smoltcp; HTTPS with TLS 1.3/1.2 (rustls + RustCrypto, certificates verified against the Mozilla roots) |
 | GUI | Immediate-mode toolkit with anti-aliased fonts (Vietnamese included), on-screen keyboard, portrait/landscape |
-| Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor, Settings, Clock, Paint, 2048 |
+| Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor, Settings, Clock, Paint, 2048, YT Player |
+| Video | YouTube playback on the board: InnerTube lookup, ranged HTTPS fetches, H.264 144p/240p decoded on core 1, Opus audio, A/V sync ([details](getting-started.md#youtube-trên-board-ytplay)) |
 
 Not yet: loading user apps from SD, BLE, PPA graphics acceleration.
 
@@ -39,6 +40,8 @@ Not yet: loading user apps from SD, BLE, PPA graphics acceleration.
 | `media/` | JPEG/BMP and MP3/WAV decoding |
 | `mem/` | `memcpy`/`memmove`/`memset`/`memcmp` for the kernel, replacing the slower `compiler_builtins` versions; host-tested |
 | `net/` | Transport-independent HTTP/1.0, SNTP and TLS client logic shared by the kernel and the simulator |
+| `ytplay/` | YouTube player: InnerTube client table, WebM/fMP4 demux, Opus and H.264 decoding, player screen |
+| `third_party/` | Vendored crates with their licences (`rusty_h264` H.264 decoder, BSD-2-Clause) |
 | `sim/` | Host simulator: runs the desktop on Linux and writes PNG screenshots |
 | `scripts/` | Build, flash, serial console, JTAG register dumps, camera-based test tools |
 | `docs/` | Setup and hardware notes (Vietnamese): [getting-started.md](getting-started.md) |

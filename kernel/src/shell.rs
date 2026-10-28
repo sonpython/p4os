@@ -46,7 +46,7 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get smpdemo apps run pmp"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get yt smpdemo apps run pmp"
         ),
         "flash" => crate::flash::diagnose(),
         "apps" => crate::apploader::list(),
@@ -69,6 +69,7 @@ fn execute(cmd: &str) {
         "audio" => crate::audio::diagnose(),
         "c6" => crate::c6::probe(),
         c if c.starts_with("get ") => http_get(c[4..].trim()),
+        c if c == "yt" || c.starts_with("yt ") => crate::yt::command(&c[2..]),
         c if c.starts_with("tone") => {
             use p4os_sdk::Audio;
             let freq = c[4..].trim().parse().unwrap_or(1000);

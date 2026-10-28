@@ -140,3 +140,57 @@ Một bẫy với systimer: comparator chỉ kích hoạt khi bộ đếm **bằ
 - Số ngẫu nhiên lấy từ thanh ghi RNG `0x5011_01A4`, trộn với bộ đếm chu kỳ qua SHA-256 (`kernel/src/rng.rs`). Lúc chạy, nguồn nhiễu SAR ADC không bật, nên entropy chỉ đến từ dao động RC.
 - Đo trên board (360 MHz): handshake TLS 1.3 mất 0,25–0,9 giây, TLS 1.2 với RSA-4096 hoặc ECDSA P-384 mất 1,1–1,6 giây. Một lần tải HTTPS dùng thêm khoảng 45 KB SRAM lúc cao nhất. Stack của thread `net` dùng khoảng 16 KB trên 48 KB. Image firmware tăng từ 1,2 MB lên 2,4 MB (phân vùng `factory` có 7 MB).
 - Giới hạn: không có session resumption và keep-alive, nên mỗi lần tải là một handshake mới. Phản hồi được đọc trọn vào RAM. Simulator cũng hỗ trợ HTTPS qua cùng crate.
+- Phản hồi kết thúc khi server đóng kết nối, hoặc khi đã nhận đủ `Content-Length` (hay chunk cuối, nếu server dùng chunked). Lý do: một số server (googlevideo) vẫn giữ kết nối dù request gửi `Connection: close`.
+- App có thể gửi request đầy đủ qua `Network::request` (method, header, body, ví dụ POST JSON hoặc `Range`). Redirect chỉ được theo với GET/HEAD.
+
+## YouTube trên board (`ytplay/`)
+
+Board tự phát video YouTube, không cần PC hay Pi làm proxy. Đây là tính năng dùng cho cá nhân: cách lấy luồng giả làm app YouTube và trái điều khoản của YouTube (người dùng chấp nhận rủi ro này). Request **không** gắn tài khoản Google nào.
+
+Cách hoạt động:
+
+1. Gọi InnerTube `POST /youtubei/v1/player` với client lấy từ bảng client (mặc định là `VISIONOS`, client duy nhất còn trả URL trực tiếp mà không cần JS hay PO token vào lúc viết). Lần gọi đầu thường bị trả `LOGIN_REQUIRED`, kèm `visitorData`. Player gọi lại với `visitorData` đó, và giữ nó cho các video sau.
+2. Chọn luồng: hình là H.264 trong fMP4 (itag 160 cho 144p, 133 cho 240p); tiếng là Opus trong WebM (itag 250, nếu không có thì 249 hoặc 251).
+3. Tải bằng HTTP `Range` theo từng đoạn (tối đa 384 KB một lần), chỉ khi phần đã tải trước còn dưới 20 giây (hình) hoặc 40 giây (tiếng). Request không có `Range` bị YouTube bóp còn khoảng 30 KB/s. URL sống khoảng 6 giờ: player tự hỏi lại trước khi hết hạn, và khi bị trả 403/410.
+4. Tách gói (fMP4: `sidx`/`moof`/`trun`; WebM: `Cues`/`Cluster`/`SimpleBlock`). Opus được giải mã ngay trong thread `audio` (crate `opus-rs`, 48 kHz). H.264 được giải mã trên thread `ytvideo` ghim vào core 1 (decoder thuần Rust `rusty_h264`, chép vào `third_party/rusty_h264` ở bản 0.16.1, giấy phép BSD-2), rồi đổi sang RGB565.
+5. Đồng hồ chung là số mẫu âm thanh đã phát. Khung hình nào đến muộn hơn 60 ms thì bỏ, không vẽ. Nếu chậm quá 1,5 giây, decoder bỏ qua tới keyframe kế tiếp. Khi hết dữ liệu, cả tiếng lẫn hình cùng dừng ("Buffering...").
+6. Màn hình dọc: video 480×270 ở trên, kèm tiêu đề, thanh tiến trình (kéo để tua), nút lùi/tới 10 giây, play/pause, chọn 144p/240p/Audio và dòng trạng thái. Màn hình ngang: video toàn màn hình, chạm để hiện nút điều khiển trong 4 giây.
+
+Cách dùng:
+
+| Việc | Cách làm |
+|---|---|
+| Mở từ launcher | App **YT Player**: nhập id hoặc link (`youtube.com/watch?v=...`, `youtu.be/...`, `/shorts/...`) |
+| Mở từ app khác (ví dụ app duyệt YouTube) | `p4os_ytplay::app::play(sys, "dQw4w9WgXcQ")`. Desktop sẽ chuyển sang màn hình player. |
+| Từ console | `yt play ID [144\|240\|audio]`, `yt pause`, `yt seek -10`, `yt seek 60`, `yt stop`, `yt stat` (fps, khung bỏ, thời gian giải mã, bộ đệm, CPU, RAM) |
+| Đo decoder trên core 1 | `yt bench URL [số khung]` (file H.264 Annex-B), `yt bench-opus URL` (file WebM Opus) |
+| Simulator | `cargo sim "yt play dQw4w9WgXcQ; wait 10000; yt stat; shot /tmp/yt.png"` |
+
+Bảng client nằm ở `/sd/p4os/youtube-clients.json`. Nếu không có file này, player dùng bảng có sẵn trong firmware. Khi YouTube chặn client đang dùng, player báo `YT-CLIENT` hoặc `YT-HTTP403` ("YouTube refused the stream"). Lúc đó, cập nhật file theo bảng `INNERTUBE_CLIENTS` trong `yt_dlp/extractor/youtube/_base.py` của bản yt-dlp mới nhất, lấy client mà yt-dlp dùng khi không có JS (`_DEFAULT_JSLESS_CLIENTS`). Không cần flash lại. Các client được thử lần lượt từ trên xuống:
+
+```json
+{
+  "clients": [
+    {
+      "name": "VISIONOS",
+      "id": 101,
+      "version": "1.02",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+      "host": "www.youtube.com",
+      "context": { "deviceMake": "Apple", "deviceModel": "RealityDevice17,1", "osName": "visionOS", "osVersion": "26.5.23O471" }
+    }
+  ]
+}
+```
+
+`name`, `version`, `userAgent` và `context` lấy từ `INNERTUBE_CONTEXT.client`; `id` là `INNERTUBE_CONTEXT_CLIENT_NAME`. Nếu file sai cú pháp, player dùng bảng có sẵn và in lý do lên màn hình.
+
+Mã lỗi: `YT-NET` (mạng), `YT-HTTPnnn` (mã HTTP lạ; 403 nghĩa là YouTube từ chối luồng), `YT-UNPLAYABLE` (video riêng tư, bị xoá, chặn vùng, giới hạn tuổi, video cho trẻ em), `YT-CLIENT` (client bị chặn), `YT-NOFORMAT` (không có luồng H.264 hoặc Opus), `YT-LIVE` (chưa hỗ trợ livestream), `YT-EXPIRED` (làm mới URL thất bại), `YT-PARSE` (không đọc được phản hồi hoặc container), `YT-DECODE` (decoder bỏ cuộc), `YT-SYSTEM` (không tạo được thread decoder).
+
+Giới hạn:
+
+- 144p là mặc định. Đo trên board: 144p giải mã khoảng 72 khung/giây trên một core, còn 240p chỉ khoảng 21 khung/giây, thấp hơn 25–30 khung/giây của luồng. Vì vậy 240p sẽ bỏ khung. 360p trở lên không chạy được.
+- Chưa có loa, nên tiếng chỉ kiểm chứng bằng bộ đếm (số mẫu đã phát, `sum` trong `yt stat`) và checksum PCM so với bản giải mã trên Pi.
+- Khi không có luồng hình (chọn Audio, hoặc video không có H.264), player hiện ảnh storyboard 160×90 của YouTube, mỗi 2–5 giây một ảnh. Nếu cũng không có storyboard, nó hiện hình động thay thế.
+- Không hỗ trợ livestream, HLS, video cần đăng nhập, và video "made for kids" (client VISIONOS không phát được loại này). Luồng HLS của YouTube chỉ có tiếng AAC, mà chưa có decoder AAC `no_std`, nên HLS không được dùng làm phương án dự phòng.
+- Đóng player khi đang tải dở: kết quả của lần tải đó được dọn ở lần mở player kế tiếp.

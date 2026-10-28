@@ -5,6 +5,7 @@
 //! Script commands (one per argument or line):
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
+//!   yt play ID [144|240|audio] | yt pause | yt seek N | yt stop | yt stat
 //!
 //! The screen starts in portrait (480x800); `--landscape` starts in 800x480.
 //!
@@ -144,6 +145,14 @@ impl Sim {
                 self.frame();
             }
             Some("shot") => self.shot(parts[1]),
+            Some("yt") if parts.get(1) == Some(&"stat") => {
+                eprintln!("{}", p4os_ytplay::remote::stats().unwrap_or_else(|| "yt: no player yet".into()));
+            }
+            Some("yt") => {
+                let c = p4os_ytplay::remote::parse_command(&cmd.trim_start()[2..]).unwrap_or_else(|e| panic!("`{cmd}`: {e}"));
+                assert!(p4os_ytplay::remote::post(c), "player command queue full");
+                self.frame();
+            }
             Some("rotate") => {
                 let o = self.sys.orientation().toggled();
                 self.sys.set_orientation(o);

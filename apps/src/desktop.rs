@@ -10,7 +10,7 @@ use p4os_sdk::gui::font::builtin::{self, Fonts};
 use p4os_sdk::gui::keyboard::{self, Keyboard};
 use p4os_sdk::gui::ui::{Align, Input, Theme, UiState};
 use p4os_sdk::{
-    App, Audio, Canvas, Color, DateTime, FileSystem, Image, Network, Orientation, Point, Rect, System, SystemStats, Ui,
+    App, Audio, Canvas, Color, DateTime, FileSystem, Image, Network, Orientation, Point, Rect, System, SystemStats, Ui, WorkerJob,
 };
 
 pub const STATUS_H: i32 = 36;
@@ -68,18 +68,26 @@ impl Desktop {
     /// Render one frame. Returns how many milliseconds until the desktop
     /// wants another frame without input (`None`: only on input).
     pub fn frame(&mut self, canvas: &mut Canvas, input: &Input, sys: &mut dyn System) -> Option<u32> {
+        // `yt play` on the console (or another app) queued a video.
+        if p4os_ytplay::remote::pending() && self.running_app() != Some(p4os_ytplay::app::APP_ID) {
+            self.launch(p4os_ytplay::app::APP_ID, sys);
+        }
         let screen = canvas.bounds();
-        let (status, body) = screen.split_top(STATUS_H);
+        // A fullscreen app (video) draws over the status and title bars.
+        let fullscreen = self.running.as_ref().is_some_and(|(_, app)| app.fullscreen());
+        let (status, body) = if fullscreen { (Rect::default(), screen) } else { screen.split_top(STATUS_H) };
         let mut proxy = SysProxy { inner: sys, launch: None };
         let keyboard_was_open = self.keyboard_open;
 
         let next = if self.running.is_some() {
-            self.app_frame(canvas, input, body, &mut proxy)
+            self.app_frame(canvas, input, body, &mut proxy, fullscreen)
         } else {
             self.home_frame(canvas, input, body, &mut proxy);
             Some(STATUS_TICK_MS)
         };
-        self.status_bar(canvas, input, status, &mut proxy);
+        if !fullscreen {
+            self.status_bar(canvas, input, status, &mut proxy);
+        }
 
         if let Some(id) = proxy.launch.take() {
             self.launch(&id, proxy.inner);
@@ -165,8 +173,8 @@ impl Desktop {
         }
     }
 
-    fn app_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy) -> Option<u32> {
-        let (title_r, mut area) = body.split_top(TITLE_H);
+    fn app_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy, fullscreen: bool) -> Option<u32> {
+        let (title_r, mut area) = if fullscreen { (Rect::default(), body) } else { body.split_top(TITLE_H) };
         let mut app_input = input.clone();
 
         // Keyboard first: its key goes to the app in the same frame, and
@@ -196,18 +204,20 @@ impl Desktop {
         {
             let mut ui = self.ui(canvas, &app_input);
             let t = *ui.theme;
-            ui.fill(title_r, t.surface);
-            ui.canvas.fill_rect(Rect::new(title_r.x, title_r.bottom() - 1, title_r.w, 1), t.border);
-            let back = Rect::new(title_r.x + 8, title_r.y + 6, 130, title_r.h - 12);
-            home = ui.icon_button(back, |c, r, col| {
-                let cy = r.y + r.h / 2;
-                c.line(Point::new(r.x + 26, cy - 10), Point::new(r.x + 16, cy), 3.0, col);
-                c.line(Point::new(r.x + 16, cy), Point::new(r.x + 26, cy + 10), 3.0, col);
-            }) || home;
-            let f = ui.fonts.body;
-            ui.text(Rect::new(back.x + 36, back.y, 90, back.h), "Home", &f, t.text, Align::Left);
-            let bold = ui.fonts.bold;
-            ui.text(title_r, name, &bold, t.text, Align::Center);
+            if !fullscreen {
+                ui.fill(title_r, t.surface);
+                ui.canvas.fill_rect(Rect::new(title_r.x, title_r.bottom() - 1, title_r.w, 1), t.border);
+                let back = Rect::new(title_r.x + 8, title_r.y + 6, 130, title_r.h - 12);
+                home = ui.icon_button(back, |c, r, col| {
+                    let cy = r.y + r.h / 2;
+                    c.line(Point::new(r.x + 26, cy - 10), Point::new(r.x + 16, cy), 3.0, col);
+                    c.line(Point::new(r.x + 16, cy), Point::new(r.x + 26, cy + 10), 3.0, col);
+                }) || home;
+                let f = ui.fonts.body;
+                ui.text(Rect::new(back.x + 36, back.y, 90, back.h), "Home", &f, t.text, Align::Left);
+                let bold = ui.fonts.bold;
+                ui.text(title_r, name, &bold, t.text, Align::Center);
+            }
             for k in &input.keys {
                 if *k == p4os_sdk::gui::ui::Key::Escape {
                     home = true;
@@ -286,5 +296,8 @@ impl System for SysProxy<'_> {
     }
     fn config_set(&mut self, key: &str, value: &str) {
         self.inner.config_set(key, value)
+    }
+    fn spawn_worker(&mut self, name: &'static str, core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        self.inner.spawn_worker(name, core, stack_size, job)
     }
 }
