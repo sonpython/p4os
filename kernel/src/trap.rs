@@ -1,6 +1,6 @@
 //! Trap dispatch: interrupts go to registered handlers, `ecall` enters the
 //! kernel call interface, exceptions from user apps (syscalls and faults)
-//! go to `usermode`, and any other exception is fatal.
+//! go to `usermode`, and any other exception is fatal (`fault.rs`).
 
 use crate::boot::TrapFrame;
 use crate::{irq, kprintln, sched, usermode};
@@ -23,18 +23,13 @@ pub fn exception_name(code: u32) -> &'static str {
     }
 }
 
-const REG_NAMES: [&str; 31] = [
-    "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5",
-    "t6",
-];
-
 /// mcause bits that identify the trap being serviced (interrupt flag and
 /// cause code), as opposed to the MPP/MPIE/MPIL state `mret` restores.
 const MCAUSE_TRAP_ID: u32 = (1 << 31) | 0xFFF;
 
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
+    crate::fault::enter_trap(frame);
     let f = unsafe { &mut *frame };
     let entry_mcause = f.mcause;
     let code = entry_mcause & 0xFFF;
@@ -70,15 +65,5 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
 }
 
 fn fatal_exception(f: &TrapFrame) -> ! {
-    let code = f.mcause & 0xFFF;
-    kprintln!();
-    kprintln!("*** exception {} on hart {}: {}", code, irq::hart_id(), exception_name(code));
-    kprintln!("mepc={:#010x} mtval={:#010x} mcause={:#010x}", f.mepc, f.mtval, f.mcause);
-    for (i, chunk) in f.regs.chunks(4).enumerate() {
-        for (j, value) in chunk.iter().enumerate() {
-            crate::kprint!("{:>4}={:#010x} ", REG_NAMES[i * 4 + j], value);
-        }
-        kprintln!();
-    }
-    crate::halt()
+    crate::fault::exception(f, exception_name(f.mcause & 0xFFF))
 }

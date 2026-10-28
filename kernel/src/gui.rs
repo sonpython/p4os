@@ -46,8 +46,10 @@ fn run(_: usize) {
     let mut last_input = now_ms();
     // Set by a touch that woke the screen: input is dropped until release.
     let mut swallow = false;
+    let watch = crate::wdt::watch("gui", 15_000);
 
     loop {
+        watch.checkin();
         let forced = display::OVERRIDE.load(core::sync::atomic::Ordering::Relaxed);
         if forced != 0 {
             // The camera colour checks need a lit panel.
@@ -400,6 +402,7 @@ impl System for KernelSystem {
             psram_total,
             threads,
             battery_mv: crate::battery::millivolts(),
+            last_crash: crate::fault::last_crash(),
             chip: format!("ESP32-P4 v{}.{}, frame {} us + present {} us", crate::efuse::chip_revision().0, crate::efuse::chip_revision().1, self.last_frame_us, self.last_present_us),
         }
     }
@@ -419,7 +422,8 @@ impl System for KernelSystem {
     }
 
     fn run_command(&mut self, line: &str) -> String {
-        crate::shell::capture(line)
+        // Terminal commands may legitimately run for long (format, bench).
+        crate::wdt::busy(|| crate::shell::capture(line))
     }
 
     fn launch(&mut self, _app_id: &str) {}

@@ -18,6 +18,7 @@ mod config;
 mod display;
 mod console;
 mod efuse;
+mod fault;
 mod flash;
 mod fs;
 mod gpio;
@@ -40,6 +41,7 @@ mod shell;
 mod smp;
 mod soc;
 mod spin;
+mod stack_guard;
 mod sync;
 mod syscall;
 mod systimer;
@@ -73,7 +75,8 @@ pub fn measure_cpu_mhz() -> u32 {
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
-    wdt::disable_all();
+    wdt::init();
+    stack_guard::init_clock();
 
     let (major, minor) = efuse::chip_revision();
     let mac = efuse::mac();
@@ -102,6 +105,7 @@ extern "C" fn kmain() -> ! {
     apploader::init();
     irq::init();
     smp::init_ipi();
+    init_fault_handling();
     time::init();
     console::init_rx();
     i2c::init();
@@ -110,6 +114,7 @@ extern "C" fn kmain() -> ! {
     }
     config::init();
     power::init();
+    fault::boot_report();
     // After every boot step that runs with interrupts masked (flash reads
     // in config::init included), so the first tick is not counted late.
     time::resync();
@@ -118,6 +123,7 @@ extern "C" fn kmain() -> ! {
     time::sleep_ms(1000);
     kprintln!("tick check: {} ticks after 1 s sleep", time::ticks());
     sched::spawn("shell", 2, 32 * 1024, shell::run, 0);
+    wdt::start_supervisor();
     audio::init();
     gui::start();
     smp::start_core1();
@@ -125,14 +131,20 @@ extern "C" fn kmain() -> ! {
     sched::start()
 }
 
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    kprintln!("\n*** kernel panic: {}", info);
-    halt()
+/// Per-core part of fault recovery: the stack guard and the watchdog
+/// interrupt. Called on each core before it enables interrupts.
+pub fn init_fault_handling() {
+    stack_guard::init_core();
+    wdt::init_core();
 }
 
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    fault::panic(info)
+}
+
+/// Stop on an unrecoverable kernel state the caller has just logged. Goes
+/// through the crash path, so the chip saves a report and resets.
 pub fn halt() -> ! {
-    loop {
-        unsafe { asm!("wfi") };
-    }
+    panic!("unrecoverable kernel state (see the log line before)")
 }

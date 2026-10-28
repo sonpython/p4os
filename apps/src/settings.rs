@@ -489,6 +489,7 @@ impl Settings {
         let chip = if s.chip.is_empty() { DASH.to_string() } else { s.chip.clone() };
         let mhz = if s.cpu_mhz == 0 { DASH.to_string() } else { format!("{} MHz", s.cpu_mhz) };
         let threads = if s.threads.is_empty() { DASH.to_string() } else { format!("{}", s.threads.len()) };
+        let last_crash = if s.last_crash.is_empty() { "None".to_string() } else { s.last_crash.clone() };
         let rows = [
             ("Operating system", OS_NAME.to_string()),
             ("Chip", chip),
@@ -498,6 +499,7 @@ impl Settings {
             ("Kernel threads", threads),
             ("Installed apps", format!("{}", crate::APPS.len())),
             ("Rotation", "Manual (no accelerometer)".to_string()),
+            ("Last crash", last_crash),
         ];
         let row_h = 50;
         let p = Rect::new(r.x, r.y, r.w, rows.len() as i32 * row_h);
