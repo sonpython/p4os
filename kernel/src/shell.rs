@@ -67,6 +67,11 @@ fn execute(cmd: &str) {
             crate::audio::Speaker.play(alloc::boxed::Box::new(crate::audio::Tone::new(freq, 3000)));
         }
         c if c == "ls" || c.starts_with("ls ") => ls(c[2..].trim()),
+        "format sd" => kprintln!("this erases the whole SD card; type: format sd ERASE-ALL"),
+        "format sd ERASE-ALL" => match crate::fs::format() {
+            Ok(()) => kprintln!("SD card formatted"),
+            Err(e) => kprintln!("format failed: {}", e),
+        },
 
         "sd slow1" => sd_probe(crate::sdmmc::BusConfig { four_bit: false, clock: (10, 20) }),
         "sd slow4" => sd_probe(crate::sdmmc::BusConfig { four_bit: true, clock: (10, 20) }),
