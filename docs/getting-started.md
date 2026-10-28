@@ -220,7 +220,9 @@ Mã lỗi: `YT-NET` (mạng), `YT-HTTPnnn` (mã HTTP lạ; 403 nghĩa là YouTub
 
 Giới hạn:
 
-- 144p là mặc định. Đo trên board: 144p giải mã khoảng 72 khung/giây trên một core, còn 240p chỉ khoảng 21 khung/giây, thấp hơn 25–30 khung/giây của luồng. Vì vậy 240p sẽ bỏ khung. 360p trở lên không chạy được.
+- 144p là mặc định. Đo bằng `yt bench` trên board (một core, 360 MHz, luồng YouTube thật): 144p giải mã 14,3 ms/khung (khoảng 70 khung/giây, ~36 nghìn chu kỳ mỗi macroblock), đổi sang RGB565 mất thêm 4,5 ms/khung. 240p mất 45,8 ms/khung (khoảng 21 khung/giây), thấp hơn 25–30 khung/giây của luồng, nên 240p sẽ bỏ khung. 360p trở lên không chạy được. Kết quả giải mã trên board trùng từng bit với bản giải mã trên Pi (CRC của 300 khung).
+- Opus mất khoảng 2,7 ms cho mỗi gói 20 ms (khoảng 14% một core) khi chạy một mình.
+- Mỗi khung GUI vẽ lại cả màn hình. Lần chạy đầu trên board, một khung GUI mất khoảng 45 ms để vẽ và 30 ms để đổi buffer, nên video thật chỉ đạt vài khung/giây. SRAM cũng bị hết, vì mỗi gói đã tách được cấp phát riêng. Bản hiện tại giữ dữ liệu đã tách và PCM trong PSRAM, và chỉ vẽ lại khi tới lúc hiện khung kế tiếp. Các sửa đổi này **chưa được đo lại trên board**, vì board mất kết nối USB.
 - Chưa có loa, nên tiếng chỉ kiểm chứng bằng bộ đếm (số mẫu đã phát, `sum` trong `yt stat`) và checksum PCM so với bản giải mã trên Pi.
 - Khi không có luồng hình (chọn Audio, hoặc video không có H.264), player hiện ảnh storyboard 160×90 của YouTube, mỗi 2–5 giây một ảnh. Nếu cũng không có storyboard, nó hiện hình động thay thế.
 - Không hỗ trợ livestream, HLS, video cần đăng nhập, và video "made for kids" (client VISIONOS không phát được loại này). Luồng HLS của YouTube chỉ có tiếng AAC, mà chưa có decoder AAC `no_std`, nên HLS không được dùng làm phương án dự phòng.
