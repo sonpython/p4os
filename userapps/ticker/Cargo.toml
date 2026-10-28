@@ -1,0 +1,14 @@
+[package]
+name = "ticker"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "p4os user-mode example: prints, sleeps, reads the time and checks syscall errors"
+
+[[bin]]
+name = "ticker"
+test = false
+bench = false
+
+[dependencies]
+p4os-user = { path = "../p4os-user" }
