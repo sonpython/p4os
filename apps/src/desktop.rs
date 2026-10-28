@@ -9,13 +9,14 @@
 //! the limits in [`policy::Limits`] (see `wm/`).
 
 use crate::wm::gesture::{self, Gesture, Recognizer, Sample, Track, Verdict};
+use crate::wm::launcher::{self, Catalogue, Grid};
+use crate::wm::pager::{self, Pager};
 use crate::wm::lifecycle::{self, Callback};
 use crate::wm::policy::{self, AppRecord, CpuMeter, HangWatch, KillReason, Limits};
 use crate::wm::switcher::{self, Card, Switcher};
 use crate::wm::thumb::{self, Thumbnail};
 use crate::wm::feedback;
 use crate::lock::{self, Lock};
-use crate::APPS;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
@@ -25,7 +26,7 @@ use p4os_sdk::gui::font::builtin::{self, Fonts};
 use p4os_sdk::gui::keyboard::{self, Keyboard};
 use p4os_sdk::gui::ui::{Align, Input, Key, Theme, UiState};
 use p4os_sdk::{
-    App, AppHandle, AppState, AppUsage, Audio, Canvas, Capabilities, Color, DateTime, FileSystem, Image, Network,
+    App, AppHandle, AppInfo, AppState, AppUsage, Audio, Canvas, Capabilities, Color, DateTime, FileSystem, Image, Network,
     Orientation, Point, Rect, System, SystemStats, Ui,
 };
 
@@ -34,7 +35,6 @@ pub const TITLE_H: i32 = 56;
 /// Bottom strip holding the home indicator. It is also the bottom gesture
 /// zone, so app content never sits under it.
 pub const HOME_BAR_H: i32 = 24;
-const ICON: i32 = 112;
 const STATUS_TICK_MS: u32 = 1000;
 /// Frame interval while a gesture or an animation is running.
 const ANIM_FRAME_MS: u32 = 16;
@@ -47,8 +47,7 @@ const MAX_TAG: u8 = 15;
 
 /// One running built-in app.
 struct Running {
-    /// Index into [`APPS`].
-    info: usize,
+    info: &'static AppInfo,
     app: Box<dyn App>,
     state: AppState,
     /// Heap owner tag, also the app's handle.
@@ -68,7 +67,7 @@ struct Running {
 
 impl Running {
     fn name(&self) -> &'static str {
-        APPS[self.info].name
+        self.info.name
     }
 }
 
@@ -91,6 +90,17 @@ enum Anim {
 struct HangPrompt {
     tag: u8,
     worst_ms: u32,
+}
+
+/// The launcher pages' static layer (wallpaper, title, icons, labels).
+/// Drawing a page takes about 280 ms on the board, far too slow for
+/// gestures, page swipes and transitions, so each page is drawn once and
+/// copied afterwards (about 710 KB per page in portrait, in PSRAM by size).
+struct HomeCache {
+    size: (i32, i32),
+    /// Catalogue version the pages were drawn from.
+    version: u32,
+    pages: Vec<Option<Vec<Color>>>,
 }
 
 /// Render times of gesture and animation frames, logged per gesture.
@@ -126,6 +136,10 @@ pub struct Desktop {
     usage: Rc<Vec<AppUsage>>,
     perf: Perf,
     lock: Lock,
+    home_cache: Option<HomeCache>,
+    catalogue: Catalogue,
+    /// Home screen page; kept while apps come and go (not across reboots).
+    pager: Pager,
 }
 
 impl Default for Desktop {
@@ -156,19 +170,6 @@ fn replay(i: &mut Input, at: Point, released: bool) {
         i.released = false;
         i.delta = Point::new(i.pos.x - at.x, i.pos.y - at.y);
     }
-}
-
-/// Launcher cell and icon rectangles of app `i` on the home screen.
-fn launcher_cell(body: Rect, i: usize) -> (Rect, Rect) {
-    // 4 columns in portrait, 6 in landscape.
-    let cols = (body.w / 150).max(3);
-    let cell_w = body.w / cols;
-    let cell_h = ICON + 56;
-    let top = body.y + 40;
-    let (col, row) = (i as i32 % cols, i as i32 / cols);
-    let cell = Rect::new(body.x + col * cell_w, top + row * cell_h, cell_w, cell_h);
-    let icon = Rect::new(cell.x + (cell.w - ICON) / 2, cell.y, ICON, ICON);
-    (cell, icon)
 }
 
 fn caps_note(c: Capabilities) -> &'static str {
@@ -203,7 +204,30 @@ impl Desktop {
             usage: Rc::new(Vec::new()),
             perf: Perf::default(),
             lock: Lock::default(),
+            home_cache: None,
+            catalogue: Catalogue::builtin(),
+            pager: Pager::default(),
         }
+    }
+
+    /// Add an app to the launcher. Apps of the main group ([`launcher::MAIN`],
+    /// the built-in ones) come first; every other group, such as
+    /// "Examples", starts on a page of its own titled with the group name.
+    /// Registering a known id again moves it to `group`.
+    pub fn register_app(&mut self, group: &'static str, app: &'static AppInfo) {
+        self.catalogue.register(group, app);
+    }
+
+    /// Register every app of `apps` in `group`.
+    pub fn register_group(&mut self, group: &'static str, apps: &'static [AppInfo]) {
+        for app in apps {
+            self.catalogue.register(group, app);
+        }
+    }
+
+    /// Home screen page shown (0 = first).
+    pub fn home_page(&self) -> usize {
+        self.pager.page()
     }
 
     /// True while the lock screen is up: nothing else is drawn and no input
@@ -229,7 +253,7 @@ impl Desktop {
 
     /// Id of the app in the foreground.
     pub fn running_app(&self) -> Option<&'static str> {
-        self.fg.and_then(|t| self.find(t)).map(|i| APPS[self.running[i].info].id)
+        self.fg.and_then(|t| self.find(t)).map(|i| self.running[i].info.id)
     }
 
     /// Enable or disable system gestures. The lock screen turns them off so
@@ -261,13 +285,13 @@ impl Desktop {
     }
 
     fn start(&mut self, id: &str, sys: &mut dyn System) {
-        let Some(info) = APPS.iter().position(|a| a.id == id) else {
+        let Some(info) = self.catalogue.find(id) else {
             sys.log(&format!("desktop: no app '{id}'"));
             return;
         };
         self.switcher = None;
         self.anim = None;
-        if let Some(tag) = self.running.iter().find(|r| r.info == info).map(|r| r.tag) {
+        if let Some(tag) = self.running.iter().find(|r| r.info.id == info.id).map(|r| r.tag) {
             self.bring_to_front(tag, sys);
             return;
         }
@@ -283,7 +307,7 @@ impl Desktop {
         };
         let now = sys.uptime_ms();
         let prev = sys.set_heap_owner(tag);
-        let app = (APPS[info].create)();
+        let app = (info.create)();
         sys.set_heap_owner(prev);
         self.running.push(Running {
             info,
@@ -332,7 +356,7 @@ impl Desktop {
         r.ui.wants_keyboard = false;
         r.ui.active = None;
         r.next_bg_tick = 0;
-        let granted = lifecycle::granted(APPS[r.info].background, r.app.background_work());
+        let granted = lifecycle::granted(r.info.background, r.app.background_work());
         r.granted = granted;
         self.keyboard_open = false;
         self.set_state(idx, lifecycle::off_screen_state(granted), sys);
@@ -525,7 +549,7 @@ impl Desktop {
         } else if self.fg.is_some() {
             (next, leave) = self.app_frame(canvas, &content_input, body, &mut proxy, now);
         } else {
-            self.home_frame(canvas, &content_input, body, &mut proxy);
+            self.home_frame(canvas, &content_input, body, &mut proxy, now);
             self.draw_home_anim(canvas, body, now);
         }
         if leave {
@@ -568,6 +592,7 @@ impl Desktop {
 
         let animating = self.track.is_some()
             || self.gestures.busy()
+            || (self.fg.is_none() && self.switcher.is_none() && self.pager.animating(now))
             || self.anim.is_some()
             || self.switcher.as_ref().is_some_and(|(s, _)| s.animating(now));
         self.account_perf(&mut proxy, animating, started_us);
@@ -608,6 +633,8 @@ impl Desktop {
                     self.switcher = Some((Switcher::new(now), back_to));
                 }
             }
+            Gesture::Back if self.switcher.is_none() && self.fg.is_none() => self.turn_page(-1, sys, now),
+            Gesture::Forward if self.switcher.is_none() && self.fg.is_none() => self.turn_page(1, sys, now),
             Gesture::Back => {
                 if self.switcher.is_some() {
                     self.dismiss_switcher(sys);
@@ -624,6 +651,16 @@ impl Desktop {
                 }
             }
         }
+    }
+
+    /// Edge Back / Forward on the home screen turn to the previous / next
+    /// page, as a page swipe in the same direction would.
+    fn turn_page(&mut self, delta: i32, sys: &mut dyn System, now: u64) {
+        let (w, h) = sys.orientation().size();
+        let body = Rect::new(0, STATUS_H, w, h - STATUS_H - HOME_BAR_H);
+        let n = self.catalogue.pages(Grid::for_area(body).per_page()).len();
+        let target = (self.pager.page() as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.pager.go_to(target, n, now, w);
     }
 
     fn dismiss_switcher(&mut self, sys: &mut dyn System) {
@@ -664,7 +701,7 @@ impl Desktop {
             if r.state != AppState::Background && !(locked && fg) {
                 continue;
             }
-            let granted = lifecycle::granted(APPS[r.info].background, r.app.background_work());
+            let granted = lifecycle::granted(r.info.background, r.app.background_work());
             if !fg {
                 r.granted = granted;
             }
@@ -710,6 +747,9 @@ impl Desktop {
         let stats = sys.stats();
         let free = |used: usize, total: usize| if total == 0 { usize::MAX } else { total.saturating_sub(used) };
         let (free_sram, free_psram) = (free(stats.heap_used, stats.heap_total), free(stats.psram_used, stats.psram_total));
+        if policy::under_pressure(free_sram, free_psram, &limits) && self.home_cache.take().is_some() {
+            sys.log("desktop: low memory, dropped the home screen cache");
+        }
         let mut records = self.records();
         let actions = policy::plan(&mut records, free_sram, free_psram, &limits, now);
         for (r, rec) in self.running.iter_mut().zip(&records) {
@@ -796,32 +836,109 @@ impl Desktop {
         }
     }
 
-    fn home_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy) {
-        canvas.fill_gradient(body, Color::hex(0x1b2a4a), Color::hex(0x0b0f18));
-        let running: Vec<usize> = self.running.iter().map(|r| r.info).collect();
+    fn home_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy, now: u64) {
+        let grid = Grid::for_area(body);
+        let pages = self.catalogue.pages(grid.per_page());
+        let n = pages.len();
+        let s = pager::Sample { pos: input.pos, down: input.down, t_ms: now };
+        let scroll = self.pager.update(s, body.w, n, self.gestures.cfg.slop);
+
+        let size = (body.w, body.h);
+        let version = self.catalogue.version;
+        if !self.home_cache.as_ref().is_some_and(|c| c.size == size && c.version == version && c.pages.len() == n) {
+            self.home_cache = Some(HomeCache { size, version, pages: (0..n).map(|_| None).collect() });
+        }
+        // Pages on screen: the one scrolled to and its right neighbour.
+        let first = (scroll.max(0) / body.w) as usize;
+        let visible: Vec<usize> = [first, first + 1].into_iter().filter(|&p| p < n).collect();
+        for &p in &visible {
+            if self.home_cache.as_ref().is_some_and(|c| c.pages[p].is_none()) {
+                self.draw_home_page(canvas, body, &grid, &pages[p]);
+                let mut pixels = Vec::with_capacity(((body.w * body.h) as usize).max(thumb::PSRAM_MIN / 2));
+                let stride = canvas.width();
+                for y in body.y..body.bottom() {
+                    let row = (y * stride + body.x) as usize;
+                    pixels.extend_from_slice(&canvas.pixels()[row..row + body.w as usize]);
+                }
+                if let Some(c) = self.home_cache.as_mut() {
+                    c.pages[p] = Some(pixels);
+                }
+            }
+        }
+        // Rubber-banding past either end shows plain wallpaper.
+        if scroll < 0 || scroll > (n as i32 - 1) * body.w {
+            canvas.fill_gradient(body, Color::hex(0x1b2a4a), Color::hex(0x0b0f18));
+        }
+        let old = canvas.set_clip(body.intersect(&canvas.clip()));
+        if let Some(cache) = &self.home_cache {
+            for &p in &visible {
+                if let Some(px) = &cache.pages[p] {
+                    canvas.blit(Point::new(body.x + p as i32 * body.w - scroll, body.y), px, body.w, body.h);
+                }
+            }
+        }
+        let page_rect = |p: usize| Rect::new(body.x + p as i32 * body.w - scroll, body.y, body.w, body.h);
+        // A dot under running apps.
+        for r in &self.running {
+            if let Some((p, slot)) = launcher::locate(&pages, r.info.id).filter(|(p, _)| visible.contains(p)) {
+                let (cell, icon) = grid.cell(page_rect(p), slot);
+                canvas.fill_circle(Point::new(cell.x + cell.w / 2, icon.bottom() + 42), 3.0, self.theme.accent);
+            }
+        }
+        canvas.restore_clip(old);
+
+        // Icons react only while the pages rest.
         let mut tapped = None;
-        let mut ui = self.ui(canvas, input);
-        for (i, app) in APPS.iter().enumerate() {
-            let (cell, icon) = launcher_cell(body, i);
-            let (held, clicked) = ui.interact(cell);
-            (app.icon)(ui.canvas, icon);
-            if held {
-                ui.canvas.fill_rect_alpha(icon, Color::BLACK, 70);
+        if !self.pager.swiping() && !self.pager.animating(now) {
+            let page = self.pager.page().min(n.saturating_sub(1));
+            let mut ui = self.ui(canvas, input);
+            for (slot, app) in pages[page].apps.iter().enumerate() {
+                let (cell, icon) = grid.cell(body, slot);
+                let (held, clicked) = ui.interact(cell);
+                if held {
+                    ui.canvas.fill_rect_alpha(icon, Color::BLACK, 70);
+                }
+                if clicked {
+                    tapped = Some(app.id);
+                }
             }
-            let f = ui.fonts.body;
-            let c = ui.theme.text;
-            ui.text(Rect::new(cell.x, icon.bottom() + 8, cell.w, 28), app.name, &f, c, Align::Center);
-            if running.contains(&i) {
-                // A dot under running apps.
-                let accent = ui.theme.accent;
-                ui.canvas.fill_circle(Point::new(cell.x + cell.w / 2, icon.bottom() + 42), 3.0, accent);
-            }
-            if clicked {
-                tapped = Some(app.id);
-            }
+        }
+        if n > 1 {
+            feedback::page_dots(canvas, body, n, scroll as f32 / body.w as f32, self.theme.text, self.theme.text_dim);
         }
         if let Some(id) = tapped {
             sys.launch(id);
+        }
+    }
+
+    /// The static layer of one launcher page, drawn at `body`.
+    fn draw_home_page(&mut self, canvas: &mut Canvas, body: Rect, grid: &Grid, page: &launcher::Page) {
+        canvas.fill_gradient(body, Color::hex(0x1b2a4a), Color::hex(0x0b0f18));
+        let (f, text) = (self.fonts.body, self.theme.text);
+        if page.group != launcher::MAIN {
+            let tf = self.fonts.title;
+            let w = tf.measure(page.group);
+            let y = body.y + (launcher::TOP - tf.line_height) / 2 + 4;
+            tf.draw(canvas, Point::new(body.x + (body.w - w) / 2, y), page.group, text);
+        }
+        for (slot, app) in page.apps.iter().enumerate() {
+            let (cell, icon) = grid.cell(body, slot);
+            (app.icon)(canvas, icon);
+            let label = Rect::new(cell.x, icon.bottom() + 8, cell.w, 28);
+            let w = f.measure(app.name);
+            let old = canvas.set_clip(label.intersect(&canvas.clip()));
+            f.draw(canvas, Point::new(label.x + (label.w - w) / 2, label.y + (label.h - f.line_height) / 2), app.name, text);
+            canvas.restore_clip(old);
+        }
+    }
+
+    /// Where an app's icon is on the home screen page shown now, if there.
+    fn icon_on_current_page(&self, body: Rect, id: &str) -> Option<Rect> {
+        let grid = Grid::for_area(body);
+        let pages = self.catalogue.pages(grid.per_page());
+        match launcher::locate(&pages, id) {
+            Some((p, slot)) if p == self.pager.page() => Some(grid.cell(body, slot).1),
+            _ => None,
         }
     }
 
@@ -831,8 +948,11 @@ impl Desktop {
         let r = self.find(tag).map(|i| &self.running[i]);
         match r.and_then(|r| r.thumb.as_ref().map(|th| (r.info, th))) {
             Some((info, th)) if t < 1.0 => {
-                let (_, icon) = launcher_cell(body, info);
-                feedback::shrink_to(canvas, th, body, icon, t);
+                // Into its icon, or the middle of the page if the icon is
+                // on another page.
+                let c = body.center();
+                let to = self.icon_on_current_page(body, info.id).unwrap_or(Rect::new(c.x - 30, c.y - 50, 60, 100));
+                feedback::shrink_to(canvas, th, body, to, t);
             }
             _ => self.anim = None,
         }
@@ -845,8 +965,7 @@ impl Desktop {
             .iter()
             .map(|&i| {
                 let r = &self.running[i];
-                let info = &APPS[r.info];
-                Card { tag: r.tag, name: info.name, icon: info.icon, thumb: r.thumb.as_ref(), state: r.state }
+                Card { tag: r.tag, name: r.info.name, icon: r.info.icon, thumb: r.thumb.as_ref(), state: r.state }
             })
             .collect();
         let Some((sw, _)) = self.switcher.as_mut() else { return };
@@ -898,7 +1017,7 @@ impl Desktop {
             }
         }
 
-        let name = APPS[r.info].name;
+        let name = r.info.name;
         let mut ui = Ui { canvas, input: &app_input, theme: &self.theme, fonts: &self.fonts, state: &mut r.ui };
         let t = *ui.theme;
         ui.fill(title_r, t.surface);
@@ -1333,6 +1452,75 @@ mod tests {
         r.idle(5000);
         assert_eq!(r.state_of("Clock"), None);
         assert_eq!(r.state_of("Calculator"), Some(AppState::Foreground));
+    }
+
+    struct Demo;
+    impl App for Demo {
+        fn update(&mut self, ui: &mut Ui, area: Rect, _sys: &mut dyn System) {
+            ui.fill(area, Color::BLACK);
+        }
+    }
+    fn demo_icon(c: &mut Canvas, r: Rect) {
+        c.fill_rect(r, Color::WHITE);
+    }
+    fn demo_create() -> Box<dyn App> {
+        Box::new(Demo)
+    }
+    static DEMOS: [AppInfo; 2] = [
+        AppInfo { id: "demo-a", name: "Demo A", icon: demo_icon, create: demo_create, background: Capabilities::NONE },
+        AppInfo { id: "demo-b", name: "Demo B", icon: demo_icon, create: demo_create, background: Capabilities::NONE },
+    ];
+
+    fn with_examples() -> Rig {
+        let mut r = Rig::new();
+        r.d.register_group("Examples", &DEMOS);
+        r.frame();
+        r
+    }
+
+    #[test]
+    fn page_swipe_moves_between_pages_and_icons_still_tap() {
+        let mut r = with_examples();
+        assert_eq!(r.d.home_page(), 0);
+        r.swipe((400, 400), (80, 400), 0);
+        assert_eq!(r.d.home_page(), 1);
+        r.idle(300);
+        // The first slot of the Examples page.
+        r.tap(80, STATUS_H + 40 + 50);
+        r.frame();
+        assert_eq!(r.d.running_app(), Some("demo-a"));
+        // The page is kept while the app runs and after going home.
+        r.swipe((240, 795), (240, 600), 0);
+        r.idle(300);
+        assert_eq!(r.d.home_page(), 1);
+        r.swipe((80, 400), (400, 400), 0);
+        assert_eq!(r.d.home_page(), 0);
+    }
+
+    #[test]
+    fn short_slow_page_drag_snaps_back_and_does_not_tap() {
+        let mut r = with_examples();
+        r.touch(300, 200, true);
+        for x in (220..300).rev().step_by(10) {
+            r.sys.advance(40);
+            r.touch(x, 200, true);
+        }
+        r.touch(220, 200, false);
+        r.idle(400);
+        assert_eq!(r.d.home_page(), 0);
+        assert_eq!(r.d.running_app(), None, "a drag is not a tap");
+    }
+
+    #[test]
+    fn edge_back_and_forward_turn_home_pages() {
+        let mut r = with_examples();
+        r.swipe((2, 400), (200, 400), 0);
+        assert_eq!(r.d.home_page(), 0, "Back on the first page does nothing");
+        r.swipe((478, 400), (280, 400), 0);
+        assert_eq!(r.d.home_page(), 1, "Forward goes to the next page");
+        r.swipe((2, 400), (200, 400), 0);
+        assert_eq!(r.d.home_page(), 0, "Back goes to the previous page");
+        assert_eq!(r.d.running_app(), None);
     }
 
     #[test]

@@ -213,7 +213,11 @@ fn poll_injected(input: &mut Input) -> bool {
     let mut slot = INJECTION.lock();
     let Some(inj) = slot.as_mut() else { return false };
     let start = *inj.start.get_or_insert(now);
-    match swipe_point(inj.from, inj.to, inj.ms, inj.hold, now - start) {
+    // A slow frame may skip past the end of the path: the finger still
+    // reaches the end point before it lifts.
+    let at = swipe_point(inj.from, inj.to, inj.ms, inj.hold, now - start)
+        .or((input.down && input.pos != inj.to).then_some(inj.to));
+    match at {
         Some(p) => {
             if !input.down {
                 input.pressed = true;

@@ -85,6 +85,20 @@ fn side(c: &mut Canvas, screen: Rect, t: &Track, cfg: &Config, accent: Color) {
     c.line(m, b, 3.0, Color::WHITE);
 }
 
+/// Home screen page indicator just above the home bar: one dot per page,
+/// the current one (`at`, fractional while swiping) highlighted.
+pub fn page_dots(c: &mut Canvas, body: Rect, pages: usize, at: f32, on: Color, off: Color) {
+    const GAP: i32 = 18;
+    let w = (pages as i32 - 1) * GAP;
+    let y = body.bottom() - super::launcher::DOTS_H / 2;
+    let x0 = body.x + (body.w - w) / 2;
+    for i in 0..pages {
+        c.fill_circle(Point::new(x0 + i as i32 * GAP, y), 4.0, off);
+    }
+    let x = x0 as f32 + at.clamp(0.0, (pages - 1) as f32) * GAP as f32;
+    c.fill_circle(Point::new(x as i32, y), 4.5, on);
+}
+
 /// The app's snapshot shrinking from `from` (its full area) into `to`
 /// (its launcher icon) as `t` goes 0..1, fading towards the end.
 pub fn shrink_to(c: &mut Canvas, thumb: &Thumbnail, from: Rect, to: Rect, t: f32) {
