@@ -1,12 +1,15 @@
 //! Reset entry and machine-mode trap entry.
 //!
 //! The 2nd-stage bootloader jumps to `_start` on HP core 0 in M-mode, with
-//! interrupts off and its own stack still in use. Core 1 stays parked in ROM.
+//! interrupts off and its own stack still in use. Core 1 stays parked in ROM
+//! until `smp::start_core1` hands it `_start_hart1`.
 
 use core::arch::global_asm;
 
 global_asm!(
     ".equ FRAME_SIZE, 144",
+    /* Must match IRQ_STACK_SIZE in link.x (checked there). */
+    ".equ IRQ_STACK_SHIFT, 13",
     r#"
     .section .text.start, "ax"
     .global _start
@@ -38,6 +41,28 @@ _start:
     call kmain
 3:  wfi
     j 3b
+
+    /* Core 1 entry, jumped to by the ROM. bss is already cleared and the
+       caches and MMU are shared with core 0, so only per-core CPU state
+       needs setting up. */
+    .balign 4
+    .global _start_hart1
+_start_hart1:
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+    csrci mstatus, 0x8
+    la sp, _stack1_top
+    li t0, 0x2000
+    csrs mstatus, t0
+    fscsr zero
+    la t0, _trap_vector
+    ori t0, t0, 3
+    csrw mtvec, t0
+    call kmain_hart1
+4:  wfi
+    j 4b
 
     .section .trap_vector, "ax"
     .balign 64
@@ -88,9 +113,13 @@ _trap_vector:
     /* a0 = frame of the interrupted context; the handler returns the
        frame to resume, which may belong to a different thread. */
     mv a0, sp
-    /* Handlers run on a dedicated stack so thread stacks only need room
-       for one saved frame on top of their own usage. Traps never nest. */
+    /* Handlers run on a dedicated per-core stack so thread stacks only
+       need room for one saved frame on top of their own usage. Traps never
+       nest. Hart h uses the h-th stack down from _irq_stack_top. */
+    csrr t0, mhartid
+    slli t0, t0, IRQ_STACK_SHIFT
     la sp, _irq_stack_top
+    sub sp, sp, t0
     call trap_handler
     mv sp, a0
 

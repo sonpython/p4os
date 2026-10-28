@@ -19,7 +19,11 @@ MEMORY
 }
 
 STACK_SIZE = 16K;
+/* Core 1 only uses its boot stack until it enters the scheduler. */
+STACK1_SIZE = 8K;
+/* One interrupt stack per hart; boot.rs indexes them by mhartid. */
 IRQ_STACK_SIZE = 8K;
+HART_COUNT = 2;
 
 SECTIONS
 {
@@ -65,10 +69,14 @@ SECTIONS
     _stack_bottom = .;
     . += STACK_SIZE;
     _stack_top = .;
+    . += STACK1_SIZE;
+    _stack1_top = .;
     _irq_stack_bottom = .;
-    . += IRQ_STACK_SIZE;
+    . += IRQ_STACK_SIZE * HART_COUNT;
     _irq_stack_top = .;
   } > SRAM
+
+  ASSERT(IRQ_STACK_SIZE == (1 << 13), "boot.rs IRQ_STACK_SHIFT must match IRQ_STACK_SIZE")
 
   _heap_start = .;
   /* After boot the loader's own SRAM is free; stop below the ROM stack. */

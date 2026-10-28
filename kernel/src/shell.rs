@@ -1,8 +1,9 @@
 //! Minimal line-oriented debug shell on the kernel console.
 
 use crate::sched::{self, State};
-use crate::sync::Mutex;
-use crate::{clock, console, heap, kprint, kprintln, time};
+use crate::sync::{Mutex, Semaphore};
+use crate::{clock, console, heap, irq, kprint, kprintln, time};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Room for `wifi save` with a 32-byte SSID and a 63-character password.
 const MAX_LINE: usize = 128;
@@ -45,7 +46,7 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench lcd hwscan flash config wifi get"
+            "commands: help uptime clock irq ps mem demo membench lcd hwscan flash config wifi get smpdemo"
         ),
         "flash" => crate::flash::diagnose(),
         "config" | "config list" => config_list(),
@@ -99,6 +100,7 @@ fn execute(cmd: &str) {
             kprintln!("peak since last mem: sram {} psram {}", speak, ppeak);
         }
         "demo" => demo(),
+        "smpdemo" => smpdemo(),
         "uptime" => kprintln!("{} ms", time::ticks()),
         "clock" => kprintln!("{}, cpu ~{} MHz", clock::dividers(), crate::measure_cpu_mhz()),
         "irq" => kprintln!("tick {} Hz, worst alarm latency {:.2} us", time::TICK_HZ, time::max_latency_us()),
@@ -107,18 +109,30 @@ fn execute(cmd: &str) {
 }
 
 pub fn dump_threads() {
-    kprintln!(" id name         prio state          cpu ms  stack used");
-    for t in sched::snapshot().into_iter().flatten() {
+    let threads = match sched::snapshot() {
+        Ok(threads) => threads,
+        Err(owner) => {
+            kprintln!("*** scheduler lock stuck (held by hart {:?})", owner);
+            return;
+        }
+    };
+    let loads: [f32; irq::HART_COUNT] = core::array::from_fn(sched::cpu_load);
+    kprintln!("cpu load: core0 {:.0}%  core1 {:.0}%", loads[0] * 100.0, loads[1] * 100.0);
+    kprintln!(" id name         prio state          core pin   cpu ms  stack used");
+    for t in threads.into_iter().flatten() {
         let state = match t.state {
-            State::Ready if t.current => "running",
+            State::Ready if t.cpu.is_some() => "running",
             State::Ready => "ready",
             State::Sleeping { .. } => "sleeping",
             State::Blocked => "blocked",
             State::Exited => "exited",
         };
+        // Core running the thread, or the last one that did.
+        let core = t.cpu.or(t.last_cpu).map_or('-', |c| (b'0' + c as u8) as char);
+        let pin = t.affinity.map_or("any", |c| if c == 0 { "0" } else { "1" });
         kprintln!(
-            "{:>3} {:<12} {:>4} {:<14} {:>6}  {:>5}/{}",
-            t.id, t.name, t.priority, state, t.run_ticks, t.stack_used, t.stack_size
+            "{:>3} {:<12} {:>4} {:<14} {:>4} {:<4} {:>7}  {:>5}/{}",
+            t.id, t.name, t.priority, state, core, pin, t.run_ticks, t.stack_used, t.stack_size
         );
     }
 }
@@ -153,6 +167,57 @@ fn float_worker(_: usize) {
     }
     let expected_close = (x - 1.6).abs() < 1.0;
     kprintln!("float: x = {} ({})", x, if expected_close { "plausible" } else { "SUSPICIOUS" });
+}
+
+const SMP_WORK: u32 = 40_000_000;
+/// Above the GUI and audio threads, so the run compares raw core
+/// throughput instead of whatever time the desktop leaves over.
+const SMP_PRIORITY: u8 = 5;
+static SMP_DONE: Semaphore = Semaphore::new(0);
+/// Bitmask of the cores each worker was seen running on.
+static SMP_CORES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+/// Run the same CPU-bound job on one thread, then on two threads at once,
+/// and compare throughput. With both cores in use the pair should finish
+/// in about the time one thread needs.
+fn smpdemo() {
+    let one = smp_run(1);
+    let two = smp_run(2);
+    kprintln!(
+        "smpdemo: 1 thread {} ms, 2 threads {} ms -> {:.2}x throughput",
+        one, two, 2.0 * one as f32 / two.max(1) as f32
+    );
+}
+
+fn smp_run(threads: usize) -> u32 {
+    const NAMES: [&str; 2] = ["spin0", "spin1"];
+    let start = time::ticks();
+    for (i, cores) in SMP_CORES.iter().enumerate().take(threads) {
+        cores.store(0, Ordering::Relaxed);
+        sched::spawn(NAMES[i], SMP_PRIORITY, 4096, smp_worker, i);
+    }
+    for _ in 0..threads {
+        SMP_DONE.acquire();
+    }
+    let ms = time::ticks() - start;
+    for (i, cores) in SMP_CORES.iter().enumerate().take(threads) {
+        kprintln!("  {}: ran on core mask {:#b}", NAMES[i], cores.load(Ordering::Relaxed));
+    }
+    ms
+}
+
+fn smp_worker(i: usize) {
+    let mut x = 0x1234_5678u32.wrapping_add(i as u32);
+    for k in 0..SMP_WORK {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        if k & 0xFFFF == 0 {
+            SMP_CORES[i].fetch_or(1 << irq::hart_id(), Ordering::Relaxed);
+        }
+    }
+    core::hint::black_box(x);
+    SMP_DONE.release();
 }
 
 /// Sequential write/read/copy throughput of a 1 MiB block in SRAM-backed

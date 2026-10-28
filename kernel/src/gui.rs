@@ -276,6 +276,7 @@ impl System for KernelSystem {
         let (heap_used, heap_total) = heap::usage();
         let (psram_used, psram_total) = heap::psram_usage();
         let threads = sched::snapshot()
+            .unwrap_or([None; sched::MAX_THREADS])
             .into_iter()
             .flatten()
             .map(|t| ThreadStat {
@@ -285,12 +286,15 @@ impl System for KernelSystem {
                 cpu_ms: t.run_ticks,
                 stack_used: t.stack_used as u32,
                 stack_size: t.stack_size as u32,
+                core: t.cpu.or(t.last_cpu).map(|c| c as u8),
             })
             .collect();
+        let core_loads: alloc::vec::Vec<f32> = (0..crate::irq::HART_COUNT).map(sched::cpu_load).collect();
         SystemStats {
             uptime_ms: time::ticks() as u64,
             cpu_mhz: 360,
-            cpu_load: sched::cpu_load(),
+            cpu_load: core_loads.iter().sum::<f32>() / core_loads.len() as f32,
+            core_loads,
             heap_used,
             heap_total,
             psram_used,

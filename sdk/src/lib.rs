@@ -136,14 +136,19 @@ pub struct ThreadStat {
     pub cpu_ms: u32,
     pub stack_used: u32,
     pub stack_size: u32,
+    /// CPU core running the thread now, or the one that ran it last.
+    pub core: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SystemStats {
     pub uptime_ms: u64,
     pub cpu_mhz: u32,
-    /// Share of time spent outside the idle thread over the last second.
+    /// Share of time spent outside the idle threads over the last second,
+    /// averaged over all cores.
     pub cpu_load: f32,
+    /// The same share for each CPU core.
+    pub core_loads: Vec<f32>,
     pub heap_used: usize,
     pub heap_total: usize,
     pub psram_used: usize,
