@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use p4os_sdk::gui::ui::Key;
 use p4os_sdk::{App, AppInfo, Canvas, Color, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "terminal", name: "Terminal", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "terminal", name: "Terminal", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 const PROMPT: &str = "p4os$ ";
 /// Logical lines kept in the scrollback.

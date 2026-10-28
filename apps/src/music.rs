@@ -13,9 +13,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use p4os_sdk::gui::font::Font;
 use p4os_sdk::gui::ui::{Align, Key};
-use p4os_sdk::{App, AppInfo, Canvas, Color, FileReader, FsError, PlaybackState, Point, Rect, System, Ui};
+use p4os_sdk::{App, AppInfo, Canvas, Capabilities, Color, FileReader, FsError, PlaybackState, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "music", name: "Music", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "music", name: "Music", icon, create, background: p4os_sdk::Capabilities::AUDIO };
 
 fn create() -> Box<dyn App> {
     Box::new(Music::default())
@@ -388,12 +388,22 @@ impl App for Music {
         (self.active && self.state != Some(PlaybackState::Paused)).then_some(TICK_MS)
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
-        // The app object is dropped on close, so nothing could advance the
+    fn on_stop(&mut self, sys: &mut dyn System) {
+        // The app object is dropped next, so nothing could advance the
         // playlist afterwards: stop rather than leave a lone track playing.
         if self.active {
             sys.audio().stop();
         }
+    }
+
+    /// Keep advancing the playlist while music plays in the background.
+    fn background_work(&self) -> Capabilities {
+        if self.active && self.state != Some(PlaybackState::Paused) { Capabilities::AUDIO } else { Capabilities::NONE }
+    }
+
+    fn background_tick(&mut self, sys: &mut dyn System) {
+        self.poll(sys);
+        self.state = Some(sys.audio().state());
     }
 }
 

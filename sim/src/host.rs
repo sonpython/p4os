@@ -112,6 +112,26 @@ impl System for HostSystem {
     fn config_set(&mut self, key: &str, value: &str) {
         self.config.insert(key.into(), value.into());
     }
+
+    fn uptime_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
+
+    fn log(&mut self, msg: &str) {
+        eprintln!("{msg}");
+    }
+
+    fn set_heap_owner(&mut self, owner: u8) -> u8 {
+        crate::memtag::set_owner(owner)
+    }
+
+    fn heap_owner_usage(&self, owner: u8) -> (usize, usize) {
+        crate::memtag::usage(owner)
+    }
+
+    fn clear_heap_owner(&mut self, owner: u8) {
+        crate::memtag::clear(owner)
+    }
 }
 
 pub fn datetime_from_unix(secs: u64) -> DateTime {

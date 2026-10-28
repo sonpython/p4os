@@ -24,13 +24,124 @@ pub trait App {
     fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System);
 
     /// Ask to be updated periodically even without input (animations,
-    /// clocks, playback position). `None` means only on input.
+    /// clocks, playback position). `None` means only on input. While the
+    /// app is in the background this paces [`App::background_tick`].
     fn tick_interval_ms(&self) -> Option<u32> {
         None
     }
 
-    /// Called when the user leaves the app; release audio, etc.
-    fn on_close(&mut self, _sys: &mut dyn System) {}
+    /// The system Back gesture (swipe in from the left edge, or Escape).
+    /// Return `true` if the app moved back (closed a page, a detail view,
+    /// went up a folder); `false` at the app's root, which sends the user
+    /// to the home screen.
+    fn on_back(&mut self, _sys: &mut dyn System) -> bool {
+        false
+    }
+
+    /// The system Forward gesture (swipe in from the right edge). Return
+    /// `true` if it was handled.
+    fn on_forward(&mut self, _sys: &mut dyn System) -> bool {
+        false
+    }
+
+    /// The app left the foreground. It keeps its state, but it is no longer
+    /// drawn and gets no CPU unless [`App::background_work`] asks for a
+    /// capability the app declared in [`AppInfo::background`]. Save
+    /// anything the user would hate to lose: a paused app may be stopped
+    /// later without another chance to run.
+    fn on_pause(&mut self, _sys: &mut dyn System) {}
+
+    /// The app is back in the foreground after [`App::on_pause`].
+    fn on_resume(&mut self, _sys: &mut dyn System) {}
+
+    /// The system is short of memory: drop caches that can be rebuilt
+    /// (decoded images, layouts). Apps that keep using too much memory in
+    /// the background are stopped.
+    fn on_low_memory(&mut self, _sys: &mut dyn System) {}
+
+    /// The app is about to be destroyed (closed by the user, from the app
+    /// switcher, or by the system). Release audio, save state.
+    fn on_stop(&mut self, _sys: &mut dyn System) {}
+
+    /// Background work the app needs right now (for example
+    /// [`Capabilities::AUDIO`] while music plays). Only capabilities also
+    /// declared in [`AppInfo::background`] are granted; without any, a
+    /// backgrounded app is suspended.
+    fn background_work(&self) -> Capabilities {
+        Capabilities::NONE
+    }
+
+    /// Periodic work while in the background with a granted capability,
+    /// paced by [`App::tick_interval_ms`] and limited by the background
+    /// CPU budget. No drawing happens in the background.
+    fn background_tick(&mut self, _sys: &mut dyn System) {}
+}
+
+/// Kinds of work an app may keep doing in the background.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Capabilities(u8);
+
+impl Capabilities {
+    pub const NONE: Capabilities = Capabilities(0);
+    /// Keep feeding audio playback (playlist advance).
+    pub const AUDIO: Capabilities = Capabilities(1 << 0);
+    /// Finish a network transfer that is in progress.
+    pub const NETWORK: Capabilities = Capabilities(1 << 1);
+
+    pub const fn union(self, other: Capabilities) -> Capabilities {
+        Capabilities(self.0 | other.0)
+    }
+
+    pub const fn intersect(self, other: Capabilities) -> Capabilities {
+        Capabilities(self.0 & other.0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, other: Capabilities) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+/// Lifecycle state of a running app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppState {
+    /// On screen and receiving input.
+    Foreground,
+    /// Off screen, doing granted background work (ticks, no drawing).
+    Background,
+    /// Off screen, state kept, no CPU at all.
+    Suspended,
+    /// Destroyed.
+    Stopped,
+}
+
+/// Identifies a running app for [`System::close_app`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppHandle {
+    /// A built-in app run by the desktop (its slot in the running list).
+    Builtin(u8),
+    /// An isolated user-mode app (its kernel thread id).
+    User(u32),
+}
+
+/// Resource use of one running app, for task managers.
+#[derive(Clone, Debug)]
+pub struct AppUsage {
+    pub handle: AppHandle,
+    pub name: String,
+    pub state: AppState,
+    /// Share of one CPU core used over the last second, in 1/1000.
+    pub cpu_permille: u16,
+    /// CPU time used since the app started.
+    pub cpu_ms: u64,
+    /// Heap attributed to the app, internal SRAM and PSRAM.
+    pub sram: usize,
+    pub psram: usize,
+    /// Short status such as "audio" or "throttled"; may be empty.
+    pub note: String,
 }
 
 /// Static description of an installed app, used by the launcher.
@@ -40,6 +151,8 @@ pub struct AppInfo {
     /// Draw the launcher icon into the given square.
     pub icon: fn(&mut Canvas, Rect),
     pub create: fn() -> Box<dyn App>,
+    /// Capabilities the app may use in the background (its manifest).
+    pub background: Capabilities,
 }
 
 #[derive(Clone, Debug)]
@@ -233,4 +346,29 @@ pub trait System {
     }
     /// Store a persistent setting; it survives reboots.
     fn config_set(&mut self, _key: &str, _value: &str) {}
+    /// Microseconds since boot, for measuring short durations.
+    fn uptime_us(&self) -> u64 {
+        self.uptime_ms() * 1000
+    }
+    /// Write a line to the system log (the serial console on the board).
+    fn log(&mut self, _msg: &str) {}
+    /// Attribute heap allocations made by the calling thread from now on to
+    /// `owner` (0 is the system). Returns the previous owner. Used by the
+    /// desktop around every call into an app.
+    fn set_heap_owner(&mut self, _owner: u8) -> u8 {
+        0
+    }
+    /// Heap bytes (SRAM, PSRAM) currently attributed to `owner`.
+    fn heap_owner_usage(&self, _owner: u8) -> (usize, usize) {
+        (0, 0)
+    }
+    /// Forget what is attributed to `owner` (its app has been destroyed).
+    fn clear_heap_owner(&mut self, _owner: u8) {}
+    /// Running apps with their resource use: built-in apps (filled in by
+    /// the desktop) and isolated user-mode apps (from the kernel).
+    fn running_apps(&self) -> Vec<AppUsage> {
+        Vec::new()
+    }
+    /// Stop a running app.
+    fn close_app(&mut self, _app: AppHandle) {}
 }

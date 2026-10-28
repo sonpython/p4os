@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use p4os_sdk::gui::ui::{Align, Key};
 use p4os_sdk::{App, AppInfo, Canvas, Color, FsError, Image, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "photos", name: "Photos", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "photos", name: "Photos", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Photos::default())
@@ -175,6 +175,26 @@ impl App for Photos {
         }
         let visible = self.grid(ui, area, &dir);
         self.load_one_thumb(sys, visible);
+    }
+
+    /// Back leaves the full-screen photo for the grid.
+    fn on_back(&mut self, _sys: &mut dyn System) -> bool {
+        if self.view.take().is_none() {
+            return false;
+        }
+        self.full = None;
+        self.redraw = true;
+        true
+    }
+
+    /// Decoded images are the bulk of the app's memory and can be decoded
+    /// again: drop the full-size one and the thumbnails.
+    fn on_low_memory(&mut self, _sys: &mut dyn System) {
+        self.full = None;
+        for t in self.thumbs.iter_mut() {
+            *t = None;
+        }
+        self.redraw = true;
     }
 
     fn tick_interval_ms(&self) -> Option<u32> {

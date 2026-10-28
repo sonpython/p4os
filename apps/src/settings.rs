@@ -8,7 +8,7 @@ use p4os_sdk::config::{check_wifi, WIFI_SSID};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DateTime, Orientation, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "settings", name: "Settings", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "settings", name: "Settings", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 const OS_NAME: &str = "p4os 0.1";
 /// Placeholder for unknown values (the bundled fonts have no em dash).
@@ -496,6 +496,14 @@ impl App for Settings {
             Section::DateTime | Section::Wifi => Some(1000),
             _ => None,
         }
+    }
+
+    /// In portrait an open section page goes back to the section list.
+    fn on_back(&mut self, _sys: &mut dyn System) -> bool {
+        let was_open = self.open;
+        self.open = false;
+        self.redraw |= was_open;
+        was_open
     }
 }
 

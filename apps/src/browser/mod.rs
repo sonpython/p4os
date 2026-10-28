@@ -14,9 +14,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use layout::{layout_html, layout_plain, Page, RunKind};
 use p4os_sdk::gui::ui::{Align, Key};
-use p4os_sdk::{App, AppInfo, Canvas, Color, FetchId, FetchState, Point, Rect, System, Ui};
+use p4os_sdk::{App, AppInfo, Canvas, Capabilities, Color, FetchId, FetchState, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "browser", name: "Browser", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "browser", name: "Browser", icon, create, background: p4os_sdk::Capabilities::NETWORK };
 
 fn create() -> Box<dyn App> {
     Box::new(Browser::new())
@@ -850,6 +850,42 @@ impl App for Browser {
         } else {
             self.loading.as_ref().map(|_| 50)
         }
+    }
+
+    fn on_back(&mut self, sys: &mut dyn System) -> bool {
+        self.history_step(Nav::Back, self.pos > 0, sys)
+    }
+
+    fn on_forward(&mut self, sys: &mut dyn System) -> bool {
+        self.history_step(Nav::Forward, self.pos + 1 < self.history.len(), sys)
+    }
+
+    /// Finish a page load that is in progress while in the background.
+    fn background_work(&self) -> Capabilities {
+        if self.loading.is_some() { Capabilities::NETWORK } else { Capabilities::NONE }
+    }
+
+    fn background_tick(&mut self, sys: &mut dyn System) {
+        self.poll(sys);
+    }
+
+    /// The laid-out page is rebuilt from the source on the next draw.
+    fn on_low_memory(&mut self, _sys: &mut dyn System) {
+        if let View::Doc(d) = &mut self.view {
+            d.page = None;
+            d.laid_w = 0;
+        }
+    }
+}
+
+impl Browser {
+    fn history_step(&mut self, nav: Nav, possible: bool, sys: &mut dyn System) -> bool {
+        if !possible {
+            return false;
+        }
+        self.apply(nav, sys);
+        self.redraw = true;
+        true
     }
 }
 

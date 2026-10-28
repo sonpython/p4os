@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use p4os_sdk::gui::ui::{Align, Key};
 use p4os_sdk::{App, AppInfo, Canvas, Color, FsError, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "notes", name: "Notes", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "notes", name: "Notes", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Notes::default())
@@ -194,7 +194,26 @@ impl App for Notes {
         self.redraw.then_some(0)
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
+    /// Back saves and closes the open note.
+    fn on_back(&mut self, sys: &mut dyn System) -> bool {
+        if self.editor.is_none() {
+            return false;
+        }
+        // If saving fails the editor stays open with the error shown.
+        self.close_editor(sys);
+        true
+    }
+
+    /// Save now: a paused app may be stopped without warning.
+    fn on_pause(&mut self, sys: &mut dyn System) {
+        if let Some(ed) = self.editor.as_mut().filter(|e| e.dirty()) {
+            if ed.save(sys) {
+                self.loaded = None;
+            }
+        }
+    }
+
+    fn on_stop(&mut self, sys: &mut dyn System) {
         if let Some(ed) = self.editor.as_mut() {
             if ed.dirty() {
                 ed.save(sys);

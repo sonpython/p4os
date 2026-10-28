@@ -13,7 +13,7 @@ use p4os_sdk::gui::font::Font;
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DirEntry, FsError, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "files", name: "Files", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "files", name: "Files", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Files::new())
@@ -191,6 +191,8 @@ struct Files {
     path: String,
     /// Paths visited before the current one (for Back).
     history: Vec<String>,
+    /// Paths left with Back, most recent last (for Forward).
+    forward: Vec<String>,
     /// Listing of `path`; `None` means it still has to be read.
     entries: Option<Result<Vec<DirEntry>, FsError>>,
     scroll: i32,
@@ -202,22 +204,40 @@ struct Files {
 
 impl Files {
     fn new() -> Self {
-        Self { path: "/".to_string(), history: Vec::new(), entries: None, scroll: 0, info: None, redraw: false }
+        Self {
+            path: "/".to_string(),
+            history: Vec::new(),
+            forward: Vec::new(),
+            entries: None,
+            scroll: 0,
+            info: None,
+            redraw: false,
+        }
     }
 
     fn go(&mut self, path: String) {
         if path != self.path {
             let old = core::mem::replace(&mut self.path, path);
             self.history.push(old);
+            self.forward.clear();
         }
         self.reload();
     }
 
-    fn back(&mut self) {
-        if let Some(p) = self.history.pop() {
-            self.path = p;
-            self.reload();
-        }
+    fn back(&mut self) -> bool {
+        let Some(p) = self.history.pop() else { return false };
+        let old = core::mem::replace(&mut self.path, p);
+        self.forward.push(old);
+        self.reload();
+        true
+    }
+
+    fn forward(&mut self) -> bool {
+        let Some(p) = self.forward.pop() else { return false };
+        let old = core::mem::replace(&mut self.path, p);
+        self.history.push(old);
+        self.reload();
+        true
     }
 
     fn reload(&mut self) {
@@ -300,6 +320,20 @@ impl App for Files {
 
     fn tick_interval_ms(&self) -> Option<u32> {
         self.redraw.then_some(0)
+    }
+
+    /// Back closes the info panel, then walks up the visited folders.
+    fn on_back(&mut self, _sys: &mut dyn System) -> bool {
+        if self.info.take().is_some() {
+            self.redraw = true;
+            return true;
+        }
+        self.back()
+    }
+
+    fn on_forward(&mut self, _sys: &mut dyn System) -> bool {
+        self.info = None;
+        self.forward()
     }
 }
 
@@ -639,11 +673,35 @@ mod tests {
         app.go("/sd".to_string());
         app.go("/sd/Pictures".to_string());
         assert_eq!(app.history, ["/", "/sd"]);
-        app.back();
+        assert!(app.back());
         assert_eq!(app.path, "/sd");
-        app.back();
+        assert!(app.back());
         assert_eq!(app.path, "/");
-        app.back();
+        assert!(!app.back());
         assert_eq!(app.path, "/");
+        assert!(app.forward());
+        assert_eq!(app.path, "/sd");
+        assert!(app.forward());
+        assert_eq!(app.path, "/sd/Pictures");
+        assert!(!app.forward());
+        // Going somewhere new forgets the forward trail.
+        app.back();
+        app.go("/sd/Music".to_string());
+        assert!(!app.forward());
+        assert_eq!(app.history, ["/", "/sd"]);
+    }
+
+    #[test]
+    fn back_gesture_closes_info_first() {
+        let mut app = Files::new();
+        app.go("/sd".to_string());
+        app.info = Some(DirEntry { name: "a.txt".into(), is_dir: false, size: 1 });
+        let mut sys = crate::testsys::TestSys::default();
+        assert!(app.on_back(&mut sys));
+        assert!(app.info.is_none());
+        assert_eq!(app.path, "/sd");
+        assert!(app.on_back(&mut sys));
+        assert_eq!(app.path, "/");
+        assert!(!app.on_back(&mut sys), "at the root Back goes home");
     }
 }

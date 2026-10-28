@@ -7,6 +7,9 @@
 extern crate alloc;
 
 pub mod desktop;
+pub mod wm;
+#[cfg(test)]
+pub(crate) mod testsys;
 pub mod icons;
 
 pub mod calculator;
