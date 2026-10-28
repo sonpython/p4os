@@ -112,6 +112,10 @@ impl System for HostSystem {
     fn config_set(&mut self, key: &str, value: &str) {
         self.config.insert(key.into(), value.into());
     }
+
+    fn fill_random(&mut self, buf: &mut [u8]) -> bool {
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
+    }
 }
 
 pub fn datetime_from_unix(secs: u64) -> DateTime {

@@ -5,6 +5,7 @@
 //! Script commands (one per argument or line):
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
+//!   config KEY VALUE (store a setting) | lock (lock the screen now)
 //!
 //! The screen starts in portrait (480x800); `--landscape` starts in 800x480.
 //!
@@ -144,6 +145,14 @@ impl Sim {
                 self.frame();
             }
             Some("shot") => self.shot(parts[1]),
+            Some("config") if parts.len() == 3 => {
+                self.sys.config_set(parts[1], parts[2]);
+                self.frame();
+            }
+            Some("lock") => {
+                self.desktop.lock_now(&mut self.sys);
+                self.frame();
+            }
             Some("rotate") => {
                 let o = self.sys.orientation().toggled();
                 self.sys.set_orientation(o);
