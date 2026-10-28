@@ -140,14 +140,17 @@ impl Desktop {
         // 4 columns in portrait, 6 in landscape.
         let cols = (body.w / 150).max(3);
         let cell_w = body.w / cols;
-        let cell_h = ICON + 56;
+        // Shrink the icons when the rows would not fit the screen.
+        let rows = APPS.len().div_ceil(cols as usize) as i32;
+        let cell_h = ((body.h - 48) / rows.max(1)).min(ICON + 56);
+        let icon_size = cell_h - 56;
         let top = body.y + 40;
         let mut tapped = None;
         let mut ui = self.ui(canvas, input);
         for (i, app) in APPS.iter().enumerate() {
             let (col, row) = (i as i32 % cols, i as i32 / cols);
             let cell = Rect::new(body.x + col * cell_w, top + row * cell_h, cell_w, cell_h);
-            let icon = Rect::new(cell.x + (cell.w - ICON) / 2, cell.y, ICON, ICON);
+            let icon = Rect::new(cell.x + (cell.w - icon_size) / 2, cell.y, icon_size, icon_size);
             let (held, clicked) = ui.interact(cell);
             (app.icon)(ui.canvas, icon);
             if held {
@@ -286,5 +289,8 @@ impl System for SysProxy<'_> {
     }
     fn config_set(&mut self, key: &str, value: &str) {
         self.inner.config_set(key, value)
+    }
+    fn config_remove(&mut self, key: &str) {
+        self.inner.config_remove(key)
     }
 }

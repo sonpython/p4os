@@ -9,3 +9,4 @@ description = "Desktop shell and built-in apps for p4os"
 p4os-sdk = { path = "../sdk" }
 p4os-media = { path = "../media" }
 libm = "0.2"
+qrcodegen-no-heap = "1.8"
