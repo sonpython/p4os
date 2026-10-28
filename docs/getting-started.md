@@ -2,6 +2,8 @@
 
 p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x**. Board mục tiêu là **Guition JC4880P443C**: màn 4,3" 480×800 ST7701S, cảm ứng GT911, codec ES8311, chip Wi-Fi ESP32-C6. Nó không dùng esp-hal, ESP-IDF hay FreeRTOS.
 
+Muốn viết app (app tích hợp hoặc app user cách ly), xem [app-development.md](app-development.md): hướng dẫn bằng tiếng Anh, có tóm tắt tiếng Việt ở đầu, kèm các app mẫu trong `apps/src/examples/` và `userapps/ticker/`.
+
 ## Yêu cầu
 
 - Rust stable kèm target `riscv32imafc-unknown-none-elf` (khai báo trong `rust-toolchain.toml`).
@@ -130,7 +132,7 @@ App user là binary riêng, không link vào kernel. Kernel nạp app từ flash
 
 | Việc | Lệnh |
 |---|---|
-| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app` |
+| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app`, `ticker.p4app` |
 | Ghi image vào slot N (0..13, địa chỉ 0x720000 + N×0x10000). Script tự giữ khoá board | `scripts/flash-app.sh 0 out/userapps/hello.p4app` |
 | Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
 | Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |

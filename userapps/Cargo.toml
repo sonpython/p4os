@@ -3,7 +3,7 @@
 # scripts/build-userapps.sh.
 [workspace]
 resolver = "2"
-members = ["p4os-user", "hello", "crash"]
+members = ["p4os-user", "hello", "crash", "ticker"]
 
 [profile.release]
 opt-level = "s"
