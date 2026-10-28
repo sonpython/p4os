@@ -1,12 +1,13 @@
 //! Trap dispatch: interrupts go to registered handlers, `ecall` enters the
-//! kernel call interface, and any other exception is fatal.
+//! kernel call interface, exceptions from user apps (syscalls and faults)
+//! go to `usermode`, and any other exception is fatal.
 
 use crate::boot::TrapFrame;
-use crate::{irq, kprintln, sched};
+use crate::{irq, kprintln, sched, usermode};
 
 const ECALL_FROM_M: u32 = 11;
 
-fn exception_name(code: u32) -> &'static str {
+pub fn exception_name(code: u32) -> &'static str {
     match code {
         0 => "instruction address misaligned",
         1 => "instruction access fault",
@@ -40,6 +41,9 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
     let resume = if entry_mcause & (1 << 31) != 0 {
         irq::dispatch(code as usize);
         if sched::take_resched() { sched::switch(frame) } else { frame }
+    } else if code == ECALL_FROM_M && usermode::is_kernel_call(f.regs[16]) {
+        f.mepc += 4;
+        usermode::kernel_call(frame)
     } else if code == ECALL_FROM_M {
         f.mepc += 4;
         match f.regs[16] {
@@ -48,6 +52,9 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
         }
         sched::take_resched();
         sched::switch(frame)
+    } else if usermode::is_user_frame(f) {
+        // Syscall or fault in a user app: never fatal for the kernel.
+        usermode::user_exception(frame)
     } else {
         fatal_exception(f)
     };
@@ -58,6 +65,7 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) -> *mut TrapFrame {
     // otherwise the interrupt line stays "in service" and never fires again.
     let r = unsafe { &mut *resume };
     r.mcause = (r.mcause & !MCAUSE_TRAP_ID) | (entry_mcause & MCAUSE_TRAP_ID);
+    usermode::before_resume(r);
     resume
 }
 

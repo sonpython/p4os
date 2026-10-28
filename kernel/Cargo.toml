@@ -16,4 +16,5 @@ smoltcp = { version = "0.12", default-features = false, features = ["alloc", "me
 p4os-sdk = { path = "../sdk" }
 p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
+p4os-abi = { path = "../abi" }
 fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "38b3a79", default-features = false, features = ["alloc", "lfn", "unicode"] }

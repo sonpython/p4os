@@ -174,6 +174,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f69bdf7e634dc76798adc292ebd4f6e8e125cde6843a264fe398c52c3f7e8541"
 
 [[package]]
+name = "p4os-abi"
+version = "0.1.0"
+
+[[package]]
 name = "p4os-apps"
 version = "0.1.0"
 dependencies = [
@@ -195,6 +199,7 @@ version = "0.1.0"
 dependencies = [
  "fatfs",
  "libm",
+ "p4os-abi",
  "p4os-apps",
  "p4os-media",
  "p4os-sdk",

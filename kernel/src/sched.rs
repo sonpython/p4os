@@ -140,6 +140,16 @@ extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
     thread_exit()
 }
 
+/// Id of the thread running on this core, if the scheduler has started.
+pub fn current_id() -> Option<usize> {
+    irq::free(|| sched().current)
+}
+
+/// End the calling thread (as if its entry function had returned).
+pub fn exit_current() -> ! {
+    thread_exit()
+}
+
 extern "C" fn thread_exit() -> ! {
     irq::free(|| {
         let s = sched();

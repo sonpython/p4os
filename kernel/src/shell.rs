@@ -43,7 +43,9 @@ pub fn capture(cmd: &str) -> alloc::string::String {
 fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
-        "help" => kprintln!("commands: help uptime clock irq ps mem demo membench lcd hwscan"),
+        "help" => kprintln!("commands: help uptime clock irq ps mem demo membench lcd hwscan apps run"),
+        "apps" => crate::apploader::list(),
+        c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
         "membench" => membench(),
         "lcd" => crate::display::diagnose(),
         "hwscan" => hwscan(),
@@ -97,6 +99,28 @@ fn execute(cmd: &str) {
         "clock" => kprintln!("{}, cpu ~{} MHz", clock::dividers(), crate::measure_cpu_mhz()),
         "irq" => kprintln!("tick {} Hz, worst alarm latency {:.2} us", time::TICK_HZ, time::max_latency_us()),
         other => kprintln!("unknown command: {}", other),
+    }
+}
+
+/// `run SLOT [ARG]`: start the user app in a flash slot and wait for it to
+/// end. The kernel logs how it ended (exit code or the fault that killed it).
+fn run_app(args: &str) {
+    let mut it = args.split_whitespace().map(str::parse::<u32>);
+    let (slot, arg) = match (it.next(), it.next(), it.next()) {
+        (Some(Ok(slot)), None, None) => (slot, 0),
+        (Some(Ok(slot)), Some(Ok(arg)), None) => (slot, arg),
+        _ => {
+            kprintln!("usage: run SLOT [ARG]");
+            return;
+        }
+    };
+    match crate::apploader::run(slot as usize, arg) {
+        Ok((_, status)) => {
+            while status.outcome().is_none() {
+                sched::sleep_ms(10);
+            }
+        }
+        Err(e) => kprintln!("run: slot {}: {}", slot, e),
     }
 }
 

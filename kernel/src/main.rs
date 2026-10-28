@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod app_desc;
+mod apploader;
 mod audio;
 mod backlight;
 mod boot;
@@ -21,6 +22,7 @@ mod irq;
 mod mmio;
 mod net;
 mod proto;
+mod pmp;
 mod psram;
 mod regi2c;
 mod rtc;
@@ -29,10 +31,12 @@ mod sdmmc;
 mod shell;
 mod soc;
 mod sync;
+mod syscall;
 mod systimer;
 mod time;
 mod touch;
 mod trap;
+mod usermode;
 mod wdt;
 mod wifi;
 

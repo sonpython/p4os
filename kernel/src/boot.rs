@@ -2,6 +2,9 @@
 //!
 //! The 2nd-stage bootloader jumps to `_start` on HP core 0 in M-mode, with
 //! interrupts off and its own stack still in use. Core 1 stays parked in ROM.
+//!
+//! Traps from user apps (U-mode) are entered on the thread's kernel stack
+//! taken from `mscratch`; see `usermode.rs` for the protocol.
 
 use core::arch::global_asm;
 
@@ -17,6 +20,8 @@ _start:
     .option pop
     la sp, _stack_top
     csrci mstatus, 0x8
+    /* mscratch != 0 marks "trapped from U-mode" in _trap_vector. */
+    csrw mscratch, zero
 
     la t0, _bss_start
     la t1, _bss_end
@@ -43,6 +48,13 @@ _start:
     .balign 64
     .global _trap_vector
 _trap_vector:
+    /* While a user app runs, mscratch holds its thread's kernel stack top;
+       in M-mode it is 0. Swap, and swap back if we came from M-mode, so a
+       trap from U-mode never stores through the untrusted user sp. */
+    csrrw sp, mscratch, sp
+    bnez sp, 4f
+    csrrw sp, mscratch, sp
+4:
     addi sp, sp, -FRAME_SIZE
     sw x1, 0(sp)
     sw x3, 8(sp)
@@ -74,8 +86,15 @@ _trap_vector:
     sw x29, 112(sp)
     sw x30, 116(sp)
     sw x31, 120(sp)
+    /* Interrupted sp: the user sp parked in mscratch (mcause.MPP = U), or
+       the M-mode sp above this frame. mscratch is 0 again afterwards. */
+    csrrw t0, mscratch, zero
+    csrr t1, mcause
+    srli t1, t1, 28
+    andi t1, t1, 3
+    beqz t1, 5f
     addi t0, sp, FRAME_SIZE
-    sw t0, 4(sp)
+5:  sw t0, 4(sp)
     csrr t0, mepc
     sw t0, 124(sp)
     csrr t0, mcause
@@ -87,6 +106,12 @@ _trap_vector:
 
     /* a0 = frame of the interrupted context; the handler returns the
        frame to resume, which may belong to a different thread. */
+    /* An app may have changed gp; the kernel needs its own. */
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
+
     mv a0, sp
     /* Handlers run on a dedicated stack so thread stacks only need room
        for one saved frame on top of their own usage. Traps never nest. */
@@ -100,6 +125,14 @@ _trap_vector:
        mret restores, so it is part of the saved context. */
     lw t0, 128(sp)
     csrw mcause, t0
+    /* Resuming U-mode (mcause.MPP = 0): park this thread's kernel stack
+       top, where its next trap frame goes, in mscratch. */
+    srli t1, t0, 28
+    andi t1, t1, 3
+    bnez t1, 6f
+    addi t1, sp, FRAME_SIZE
+    csrw mscratch, t1
+6:
     lw t0, 124(sp)
     csrw mepc, t0
     lw x1, 0(sp)
