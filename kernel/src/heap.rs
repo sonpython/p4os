@@ -1,52 +1,42 @@
-//! Kernel heap: first-fit free-list allocators over internal SRAM and
-//! PSRAM. Small allocations prefer fast SRAM; large ones (framebuffers,
+//! Kernel heap: one TLSF allocator (`p4os-tlsf`) over internal SRAM and one
+//! over PSRAM. Small allocations prefer fast SRAM; large ones (framebuffers,
 //! images, audio buffers) prefer PSRAM so SRAM stays available for stacks
-//! and hot kernel data.
+//! and hot kernel data. Either falls back to the other memory when full.
 //!
-//! Free blocks are kept in an address-ordered singly linked list whose
-//! nodes live inside the free memory itself, so the allocator needs no
-//! metadata of its own. `dealloc` receives the original `Layout`, which
-//! lets allocated blocks carry no header either. Neighbouring free blocks
-//! are merged on free to fight fragmentation.
+//! TLSF allocates and frees in constant time however fragmented the heap
+//! is, so the time each heap lock is held (with interrupts masked, see
+//! `spin.rs`) is short and bounded. Each memory has its own lock so both
+//! cores can allocate.
 //!
-//! Each pool is guarded by its own spinlock so both cores can allocate.
+//! The heap must not be used from interrupt handlers: a handler that
+//! allocates while its own core holds a heap lock would deadlock, and the
+//! bounded lock hold time relies on handlers staying out. Every entry point
+//! checks this and panics (see `ISR_CHECK`).
+//!
+//! Thread stacks of common sizes come from per-size pools (`Stack`): a
+//! stack freed by an exiting thread is kept for the next thread of that
+//! size instead of going back to the heap, so spawning and reaping threads
+//! does not punch holes into SRAM.
 
 use crate::spin::SpinLock;
 use core::alloc::{GlobalAlloc, Layout};
+use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
+use p4os_tlsf::Tlsf;
 
-const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
-const GRANULE: usize = 16;
+/// 19 first-level classes: blocks up to 64 MiB, more than PSRAM holds.
+type Region = SpinLock<Tlsf<19>>;
 
-#[repr(C)]
-struct FreeBlock {
-    size: usize,
-    next: Option<NonNull<FreeBlock>>,
-}
-
-struct State {
-    head: Option<NonNull<FreeBlock>>,
-    total: usize,
-    used: usize,
-    /// High-water mark of `used` since the last `take_peaks`.
-    peak: usize,
-}
-
-// The free-list nodes are plain memory owned by the pool; the state is only
-// reached through the pool's lock.
-unsafe impl Send for State {}
-
-type Pool = SpinLock<State>;
-
-const fn new_pool() -> Pool {
-    SpinLock::new(State { head: None, total: 0, used: 0, peak: 0 })
-}
-
-static SRAM: Pool = new_pool();
-static PSRAM: Pool = new_pool();
+static SRAM: Region = SpinLock::new(Tlsf::new());
+static PSRAM: Region = SpinLock::new(Tlsf::new());
 
 /// Allocations at least this large go to PSRAM first.
 const LARGE: usize = 64 * 1024;
+
+/// Panic when the heap is entered from trap context. The check is a stack
+/// pointer comparison, a few cycles per call, so it stays on in release
+/// builds; set to `false` only to measure its cost.
+const ISR_CHECK: bool = true;
 
 pub struct Heap;
 
@@ -56,10 +46,6 @@ static HEAP: Heap = Heap;
 unsafe extern "C" {
     static _heap_start: u8;
     static _heap_end: u8;
-}
-
-fn round_up(v: usize, a: usize) -> usize {
-    (v + a - 1) & !(a - 1)
 }
 
 /// L2 SRAM above the ROM-reserved area and below the 256 KiB L2 cache that
@@ -81,159 +67,180 @@ pub fn init() {
 /// # Safety
 /// The range must be valid, unused RAM that stays mapped forever.
 pub unsafe fn add_region(start: usize, size: usize) {
-    let pool = if is_psram(start) { &PSRAM } else { &SRAM };
-    let base = round_up(start, GRANULE);
-    let size = (start + size - base) & !(GRANULE - 1);
-    if size < MIN_BLOCK {
-        return;
-    }
-    let mut st = pool.lock();
-    st.total += size;
-    unsafe { insert_free(&mut st, base, size) };
+    unsafe { region_of(start).lock().add_region(start as *mut u8, size) };
 }
 
 fn is_psram(addr: usize) -> bool {
     (crate::psram::BASE..crate::psram::BASE + 0x0400_0000).contains(&addr)
 }
 
-/// (used, total) bytes of internal SRAM.
+fn region_of(addr: usize) -> &'static Region {
+    if is_psram(addr) { &PSRAM } else { &SRAM }
+}
+
+/// (used, total) bytes of internal SRAM, block headers included.
 pub fn usage() -> (usize, usize) {
-    pool_usage(&SRAM)
+    let h = SRAM.lock();
+    (h.used(), h.total())
 }
 
-/// (used, total) bytes of PSRAM.
+/// (used, total) bytes of PSRAM, block headers included.
 pub fn psram_usage() -> (usize, usize) {
-    pool_usage(&PSRAM)
-}
-
-fn pool_usage(pool: &Pool) -> (usize, usize) {
-    let st = pool.lock();
-    (st.used, st.total)
+    let h = PSRAM.lock();
+    (h.used(), h.total())
 }
 
 /// Peak (SRAM, PSRAM) bytes used since the previous call; restarts the
 /// measurement from the current usage.
 pub fn take_peaks() -> (usize, usize) {
-    let take = |pool: &Pool| {
-        let mut st = pool.lock();
-        let peak = st.peak;
-        st.peak = st.used;
-        peak
-    };
-    (take(&SRAM), take(&PSRAM))
+    (SRAM.lock().take_peak(), PSRAM.lock().take_peak())
 }
 
-/// Size of the largest free SRAM block, a quick fragmentation indicator.
+/// Largest SRAM allocation that would succeed right now (to within 1/16),
+/// a quick fragmentation indicator.
 pub fn largest_free() -> usize {
-    let st = SRAM.lock();
-    let mut best = 0;
-    let mut cur = st.head;
-    while let Some(b) = cur {
-        unsafe {
-            best = best.max(b.as_ref().size);
-            cur = b.as_ref().next;
-        }
-    }
-    best
+    SRAM.lock().largest_free()
 }
 
-/// Insert a free range keeping address order, merging with neighbours.
-unsafe fn insert_free(st: &mut State, addr: usize, size: usize) {
-    unsafe {
-        let mut prev: Option<NonNull<FreeBlock>> = None;
-        let mut cur = st.head;
-        while let Some(c) = cur {
-            if c.as_ptr() as usize > addr {
-                break;
-            }
-            prev = cur;
-            cur = c.as_ref().next;
-        }
-
-        let node = addr as *mut FreeBlock;
-        node.write(FreeBlock { size, next: cur });
-        let mut node = NonNull::new_unchecked(node);
-
-        // Merge with the following block.
-        if let Some(c) = cur {
-            if addr + size == c.as_ptr() as usize {
-                node.as_mut().size += c.as_ref().size;
-                node.as_mut().next = c.as_ref().next;
-            }
-        }
-        // Merge with the preceding block, or link after it.
-        match prev {
-            Some(mut p) if p.as_ptr() as usize + p.as_ref().size == addr => {
-                p.as_mut().size += node.as_ref().size;
-                p.as_mut().next = node.as_ref().next;
-            }
-            Some(mut p) => p.as_mut().next = Some(node),
-            None => st.head = Some(node),
-        }
+fn check_thread_context() {
+    if ISR_CHECK && crate::irq::in_trap() {
+        // The console bypasses its capture buffer in trap context, so the
+        // panic message itself does not allocate.
+        panic!("heap used from interrupt context");
     }
 }
 
-fn block_size(layout: &Layout) -> usize {
-    round_up(layout.size().max(MIN_BLOCK), GRANULE)
-}
-
-unsafe fn pool_alloc(pool: &Pool, size: usize, align: usize) -> *mut u8 {
-    let mut guard = pool.lock();
-    let st = &mut *guard;
-    unsafe {
-        let mut prev: Option<NonNull<FreeBlock>> = None;
-        let mut cur = st.head;
-        while let Some(c) = cur {
-            let start = c.as_ptr() as usize;
-            let end = start + c.as_ref().size;
-            let base = round_up(start, align);
-            if base + size <= end {
-                let next = c.as_ref().next;
-                match prev {
-                    Some(mut p) => p.as_mut().next = next,
-                    None => st.head = next,
-                }
-                // Return the unused head (alignment gap) and tail.
-                if base > start {
-                    insert_free(st, start, base - start);
-                }
-                if end > base + size {
-                    insert_free(st, base + size, end - base - size);
-                }
-                st.used += size;
-                st.peak = st.peak.max(st.used);
-                return base as *mut u8;
-            }
-            prev = cur;
-            cur = c.as_ref().next;
-        }
-        ptr::null_mut()
-    }
+fn region_alloc(region: &Region, layout: &Layout) -> *mut u8 {
+    check_thread_context();
+    region.lock().alloc(layout.size(), layout.align()).map_or(ptr::null_mut(), NonNull::as_ptr)
 }
 
 /// Allocate from internal SRAM only, whatever the size (the global
 /// allocator would send large blocks to PSRAM). Returns null when SRAM has
 /// no fitting block. Free with the global allocator (`alloc::alloc::dealloc`).
 pub fn alloc_sram(layout: Layout) -> *mut u8 {
-    unsafe { pool_alloc(&SRAM, block_size(&layout), layout.align().max(GRANULE)) }
+    region_alloc(&SRAM, &layout)
+}
+
+/// Allocate preferring SRAM, falling back to PSRAM.
+fn alloc_sram_first(layout: &Layout) -> *mut u8 {
+    let p = region_alloc(&SRAM, layout);
+    if p.is_null() { region_alloc(&PSRAM, layout) } else { p }
 }
 
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = block_size(&layout);
-        let align = layout.align().max(GRANULE);
-        let (first, second) = if size >= LARGE { (&PSRAM, &SRAM) } else { (&SRAM, &PSRAM) };
-        unsafe {
-            let p = pool_alloc(first, size, align);
-            if p.is_null() { pool_alloc(second, size, align) } else { p }
+        if layout.size() >= LARGE {
+            let p = region_alloc(&PSRAM, &layout);
+            if p.is_null() { region_alloc(&SRAM, &layout) } else { p }
+        } else {
+            alloc_sram_first(&layout)
         }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let size = block_size(&layout);
-        let pool = if is_psram(ptr as usize) { &PSRAM } else { &SRAM };
-        let mut st = pool.lock();
-        st.used -= size;
-        unsafe { insert_free(&mut st, ptr as usize, size) };
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        check_thread_context();
+        let Some(p) = NonNull::new(ptr) else { return };
+        unsafe { region_of(ptr as usize).lock().free(p) };
+    }
+}
+
+// --- thread stacks ----------------------------------------------------------
+
+/// Stack sizes served from pools; other sizes use the heap directly.
+const STACK_CLASSES: [usize; 7] = [2048, 4096, 8192, 16384, 24576, 32768, 49152];
+
+/// Idle SRAM stacks per class, linked through their first word.
+struct StackPool {
+    head: [*mut u8; STACK_CLASSES.len()],
+    count: [u16; STACK_CLASSES.len()],
+}
+
+// The idle stacks are memory owned by the pool, reached only under its lock.
+unsafe impl Send for StackPool {}
+
+static STACKS: SpinLock<StackPool> = SpinLock::new(StackPool {
+    head: [ptr::null_mut(); STACK_CLASSES.len()],
+    count: [0; STACK_CLASSES.len()],
+});
+
+/// Number and total bytes of idle stacks kept in the pools.
+pub fn stack_pool_idle() -> (usize, usize) {
+    let p = STACKS.lock();
+    p.count.iter().zip(STACK_CLASSES).fold((0, 0), |(n, b), (&c, size)| (n + c as usize, b + c as usize * size))
+}
+
+/// A thread stack: `len` bytes of `u32` words, from a stack pool when the
+/// size is one of the common ones, otherwise from the heap. Returned to
+/// where it came from on drop.
+pub struct Stack {
+    ptr: NonNull<u32>,
+    words: usize,
+    layout: Layout,
+    /// Pool class to return to; `None` for heap stacks and PSRAM fallbacks.
+    class: Option<usize>,
+}
+
+// The stack memory is owned exclusively by this handle.
+unsafe impl Send for Stack {}
+
+impl Stack {
+    /// A stack of `len` bytes (a multiple of 16) with every word set to
+    /// `fill`. Out of memory is fatal, as for any other allocation.
+    pub fn new(len: usize, fill: u32) -> Stack {
+        let class = STACK_CLASSES.iter().position(|&c| c >= len);
+        let layout = Layout::from_size_align(class.map_or(len, |c| STACK_CLASSES[c]), 16).expect("stack size");
+        check_thread_context();
+        let reused = class.and_then(|c| {
+            let mut pool = STACKS.lock();
+            let p = pool.head[c];
+            if p.is_null() {
+                return None;
+            }
+            pool.head[c] = unsafe { p.cast::<*mut u8>().read() };
+            pool.count[c] -= 1;
+            Some(p)
+        });
+        let p = match reused {
+            Some(p) => p,
+            None if class.is_some() => alloc_sram_first(&layout),
+            None => unsafe { HEAP.alloc(layout) },
+        };
+        let Some(ptr) = NonNull::new(p.cast::<u32>()) else { alloc::alloc::handle_alloc_error(layout) };
+        // Only SRAM stacks are worth keeping; a PSRAM fallback goes back
+        // to the heap so a later spawn can get SRAM.
+        let class = class.filter(|_| !is_psram(p as usize));
+        let mut stack = Stack { ptr, words: len / 4, layout, class };
+        stack.fill(fill);
+        stack
+    }
+}
+
+impl Deref for Stack {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.words) }
+    }
+}
+
+impl DerefMut for Stack {
+    fn deref_mut(&mut self) -> &mut [u32] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.words) }
+    }
+}
+
+impl Drop for Stack {
+    fn drop(&mut self) {
+        let p = self.ptr.as_ptr().cast::<u8>();
+        match self.class {
+            Some(c) => {
+                check_thread_context();
+                let mut pool = STACKS.lock();
+                unsafe { p.cast::<*mut u8>().write(pool.head[c]) };
+                pool.head[c] = p;
+                pool.count[c] += 1;
+            }
+            None => unsafe { HEAP.dealloc(p, self.layout) },
+        }
     }
 }

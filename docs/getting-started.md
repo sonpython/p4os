@@ -17,6 +17,7 @@ p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x*
 | Reset board và xem console | `python3 scripts/monitor.py [giây]` |
 | Giữ quyền dùng board riêng khi nhiều tiến trình chạy song song | `scripts/board-lock.sh <lệnh>` |
 | Reset, gửi lệnh shell rồi in phản hồi | `python3 scripts/shell-session.py ps mem demo` |
+| Chạy test trên máy host (gồm test của allocator TLSF) | `cargo test -p p4os-apps -p p4os-gui -p p4os-net -p p4os-sdk -p p4os-tlsf --target aarch64-unknown-linux-gnu` |
 
 Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`).
 
@@ -53,7 +54,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -95,6 +96,14 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 - `mcycle` là bộ đếm riêng của từng core (core 1 bắt đầu đếm muộn hơn khoảng 1 giây), nên `bench` ghim mọi thread của nó vào core 0.
 - `sched::spawn_on(Some(core), ...)` ghim thread vào một core; mặc định thread chạy trên core nào cũng được.
 - `smpdemo` đo được 1 thread 1116 ms, 2 thread 1116 ms, tức thông lượng gấp khoảng 2 lần. `config stress 50` chạy song song với tải trên cả hai core: 100 lần lưu đều đúng và không treo.
+
+## Heap
+
+- Mỗi vùng nhớ (SRAM, PSRAM) có một allocator TLSF riêng (crate `tlsf/`, gọi từ `kernel/src/heap.rs`), mỗi vùng một spinlock. Alloc và free chạy trong thời gian hằng, nên thời gian giữ lock (có che ngắt) ngắn và có cận trên, dù heap phân mảnh đến đâu. Khối nhỏ hơn 64 KiB vào SRAM trước, khối lớn vào PSRAM trước, vùng kia dùng làm dự phòng khi hết chỗ.
+- Mỗi khối có header 8 byte và được làm tròn lên bội số 16 byte. Vì thế vùng SRAM 256 KiB không còn chứa vừa đúng hai khối 128 KiB (`bench` copy SRAM dùng 2 × 127 KiB).
+- **Không được dùng heap trong trình xử lý ngắt.** Mọi lối vào heap đều kiểm tra stack pointer; nếu đang ở stack ngắt thì panic với thông báo `heap used from interrupt context`. Trong ngữ cảnh ngắt, console in thẳng ra USB thay vì ghi vào bộ đệm capture, nên Ctrl-T và thông báo lỗi không cấp phát.
+- Stack của thread cỡ 2/4/8/16/24/32/48 KiB lấy từ pool riêng của từng cỡ. Khi thread thoát, stack của nó được giữ lại trong pool cho thread sau cùng cỡ, thay vì trả về heap, nên spawn/thoát thread liên tục không làm SRAM bị thủng lỗ chỗ. `mem` in số stack đang nằm chờ trong pool. Phần bộ nhớ này vẫn được tính là đã dùng.
+- Đo bằng `bench` (thời gian một lần alloc, ngắt bị che trong lúc đo, heap có N lỗ trống xen giữa các khối còn sống). Với N = 16/256/1024, thời gian tối đa là 1,08/1,12/1,15 µs. Allocator first-fit cũ cần 0,82/4,2/12,8 µs cho alloc và tới 23,7 µs cho free. Trên heap sạch, một cặp alloc+free 32 B mất 1,26 µs (first-fit cũ: 0,60 µs). Đây là cái giá để đổi lấy cận trên.
 
 ## Màn hình: những điều đã kiểm chứng
 

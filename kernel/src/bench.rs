@@ -32,8 +32,13 @@ const IRQ_SAMPLES: u32 = 1_000;
 /// Alarm lead time: long enough for the waiter to block (or start spinning).
 const IRQ_LEAD_TICKS: u64 = 50 * systimer::TICKS_PER_US;
 const HEAP_OPS: u32 = 10_000;
+/// Fragmentation stress: number of free gaps left between live blocks.
+const FRAG_HOLES: [usize; 3] = [16, 256, 1024];
+const FRAG_OPS: u32 = 4_000;
 const MIB: usize = 1 << 20;
-const SRAM_COPY: usize = 128 * 1024;
+/// Two of these must fit the 256 KiB SRAM region together with their heap
+/// block headers, so 1 KiB short of half (ESP-IDF's version uses 128 KiB).
+const SRAM_COPY: usize = 127 * 1024;
 const CRC_BUF: usize = 64 * 1024;
 const INT_ITERS: u32 = 1_000_000;
 const SEED: u32 = 0x1234_5678;
@@ -120,6 +125,9 @@ fn runner(_: usize) {
     heap_row("heap alloc+free 32 B (sram)", 32, false);
     heap_row("heap alloc+free 1 KiB (sram)", 1024, false);
     heap_row("heap alloc+free 256 KiB (psram)", 256 * 1024, true);
+    for holes in FRAG_HOLES {
+        heap_frag_rows(holes);
+    }
 
     memcpy_rows();
     cpu_rows();
@@ -304,6 +312,91 @@ fn heap_row(name: &str, size: usize, want_psram: bool) {
     }));
 }
 
+/// Random small block size, 16..=256 bytes in 16-byte steps.
+fn frag_layout(x: &mut u32) -> Layout {
+    Layout::from_size_align(16 + (xorshift(x) % 16) as usize * 16, 4).expect("valid layout")
+}
+
+/// One timed heap call with interrupts masked, so the figure is the
+/// allocator's own cost (plus any wait for the other core) rather than
+/// whatever interrupt happened to land in the window.
+fn timed<R>(f: impl FnOnce() -> R) -> (R, u32) {
+    irq::free(|| {
+        let t0 = cycles();
+        let r = black_box(f());
+        (r, cycles().wrapping_sub(t0))
+    })
+}
+
+/// Fragment the heap with `holes` free gaps between `holes` live blocks of
+/// mixed size, then replace random live blocks with new random-size ones,
+/// which keeps the fragmentation steady. Returns [alloc avg, alloc max,
+/// free max] in ns, or `None` if the heap ran out.
+fn heap_frag_run(holes: usize, seed: u32) -> Option<[f32; 3]> {
+    let mut x = seed;
+    let mut blocks: alloc::vec::Vec<(*mut u8, Layout)> = alloc::vec::Vec::with_capacity(2 * holes);
+    let release = |blocks: &mut alloc::vec::Vec<(*mut u8, Layout)>| {
+        for &(p, l) in blocks.iter() {
+            unsafe { dealloc(p, l) };
+        }
+        blocks.clear();
+    };
+    for _ in 0..2 * holes {
+        let l = frag_layout(&mut x);
+        let p = unsafe { alloc(l) };
+        if p.is_null() {
+            release(&mut blocks);
+            return None;
+        }
+        blocks.push((p, l));
+    }
+    // Free every other block: each leaves a gap its live neighbours pin.
+    let mut live = alloc::vec::Vec::with_capacity(holes);
+    for (i, &(p, l)) in blocks.iter().enumerate() {
+        if i % 2 == 1 { unsafe { dealloc(p, l) } } else { live.push((p, l)) }
+    }
+    blocks.clear();
+    let mut blocks = live;
+
+    let (mut alloc_sum, mut alloc_max, mut free_max) = (0u64, 0u32, 0u32);
+    let mut ok = true;
+    for _ in 0..FRAG_OPS {
+        let j = xorshift(&mut x) as usize % blocks.len();
+        let (p, l) = blocks[j];
+        let ((), dt) = timed(|| unsafe { dealloc(p, l) });
+        free_max = free_max.max(dt);
+        let l = frag_layout(&mut x);
+        let (p, dt) = timed(|| unsafe { alloc(l) });
+        alloc_sum += dt as u64;
+        alloc_max = alloc_max.max(dt);
+        if p.is_null() {
+            blocks.swap_remove(j);
+            ok = false;
+            break;
+        }
+        blocks[j] = (p, l);
+    }
+    release(&mut blocks);
+    ok.then(|| [cycles_to_ns((alloc_sum / FRAG_OPS as u64) as u32), cycles_to_ns(alloc_max), cycles_to_ns(free_max)])
+}
+
+fn heap_frag_rows(holes: usize) {
+    let mut runs = [[0f32; 3]; RUNS];
+    for (r, out) in runs.iter_mut().enumerate() {
+        match heap_frag_run(holes, SEED.wrapping_add(r as u32)) {
+            Some(v) => *out = v,
+            None => {
+                kprintln!("heap frag {} holes: allocation failed", holes);
+                return;
+            }
+        }
+    }
+    let name = |what: &str| alloc::format!("heap frag {} holes: {}", holes, what);
+    row(&name("alloc avg"), "ns", column(&runs, 0));
+    row(&name("alloc max"), "ns", column(&runs, 1));
+    row(&name("free max"), "ns", column(&runs, 2));
+}
+
 // --- memory and CPU kernels (OS independent) ------------------------------
 
 /// Owned buffer from a specific memory, freed on drop.
@@ -368,7 +461,7 @@ fn copy_mib(src: &Buf, dst: &mut Buf) -> f32 {
 
 fn memcpy_rows() {
     match (Buf::new(SRAM_COPY, true), Buf::new(SRAM_COPY, true)) {
-        (Some(src), Some(mut dst)) => row("memcpy sram->sram (128 KiB x8)", "MB/s", repeat(|| copy_mib(&src, &mut dst))),
+        (Some(src), Some(mut dst)) => row("memcpy sram->sram (127 KiB x8)", "MB/s", repeat(|| copy_mib(&src, &mut dst))),
         _ => kprintln!("memcpy sram->sram: not enough SRAM for 2 x {} KiB", SRAM_COPY / 1024),
     }
     match (Buf::new(MIB, false), Buf::new(MIB, false)) {
