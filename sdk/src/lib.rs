@@ -39,6 +39,18 @@ pub trait App {
     fn fullscreen(&self) -> bool {
         false
     }
+
+    /// Called instead of `update` while the screen is locked or off, so
+    /// media can keep playing as on a phone. Returns how soon to be called
+    /// again in ms (`None`: not needed).
+    fn background(&mut self, _sys: &mut dyn System) -> Option<u32> {
+        None
+    }
+
+    /// Keep the screen from dimming and turning off (video playing).
+    fn keep_awake(&self) -> bool {
+        false
+    }
 }
 
 /// Static description of an installed app, used by the launcher.
@@ -118,26 +130,46 @@ pub trait Audio {
 
 pub type FetchId = u32;
 
-/// An HTTP request for [`Network::request`]. Header names and values must
-/// not contain CR or LF; the network layer rejects requests that do.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub enum FetchState {
+    Pending,
+    Done { status: u16, content_type: String, body: Vec<u8> },
+    Failed(String),
+}
+
+/// An HTTP request with a method, extra headers and a body, for APIs that
+/// need more than a plain GET (OAuth token exchanges, bearer tokens).
+///
+/// The OS adds Host, Accept-Encoding, Connection and Content-Length
+/// itself; requests repeating them, or with control characters in a header,
+/// fail. User-Agent defaults to p4os's and may be replaced by a header.
+/// Bodies are limited to 2 KiB.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRequest {
-    /// "GET", "POST", ...
     pub method: String,
     pub url: String,
-    /// Extra headers; `Host`, `Connection` and `Content-Length` are added
-    /// by the network layer.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
 impl HttpRequest {
     pub fn get(url: &str) -> Self {
-        Self { method: "GET".into(), url: url.into(), ..Self::default() }
+        Self { method: "GET".into(), url: url.into(), headers: Vec::new(), body: Vec::new() }
     }
 
+    /// A POST of an `application/x-www-form-urlencoded` body.
+    pub fn post_form(url: &str, body: &str) -> Self {
+        Self {
+            method: "POST".into(),
+            url: url.into(),
+            headers: alloc::vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    /// A POST of `body` with the given content type (e.g. JSON).
     pub fn post(url: &str, content_type: &str, body: Vec<u8>) -> Self {
-        Self { method: "POST".into(), url: url.into(), body, ..Self::default() }.header("Content-Type", content_type)
+        Self { method: "POST".into(), url: url.into(), headers: alloc::vec![("Content-Type".into(), content_type.into())], body }
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -150,13 +182,11 @@ impl HttpRequest {
         let value = alloc::format!("bytes={start}-{end}");
         self.header("Range", &value)
     }
-}
 
-#[derive(Clone, Debug)]
-pub enum FetchState {
-    Pending,
-    Done { status: u16, content_type: String, body: Vec<u8> },
-    Failed(String),
+    /// Plain GETs are all [`Network::fetch`] can do.
+    pub fn is_plain_get(&self) -> bool {
+        self.method == "GET" && self.headers.is_empty() && self.body.is_empty()
+    }
 }
 
 pub trait Network {
@@ -165,12 +195,26 @@ pub trait Network {
     fn is_up(&self) -> bool;
     /// Start an HTTP GET in the background.
     fn fetch(&mut self, url: &str) -> FetchId;
-    /// Start an HTTP request with a method, headers and body in the
-    /// background. Redirects are followed for GET and HEAD only.
-    fn request(&mut self, req: HttpRequest) -> FetchId;
+    /// Start any HTTP request in the background; poll it like a fetch.
+    /// Redirects to another origin drop the Authorization header.
+    ///
+    /// The default supports plain GETs only; anything else is sent to an
+    /// invalid URL so that it fails instead of silently losing its method,
+    /// headers or body.
+    fn send(&mut self, req: HttpRequest) -> FetchId {
+        if req.is_plain_get() {
+            self.fetch(&req.url)
+        } else {
+            self.fetch("unsupported:request-with-method-headers-or-body")
+        }
+    }
     /// Current state of a fetch. Once `Done` or `Failed` has been
     /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
+    /// Abandon a request (the app is closing or no longer needs it): the
+    /// OS stops it and frees its result. Polling the id afterwards reports
+    /// an unknown request. The default does nothing.
+    fn cancel(&mut self, _id: FetchId) {}
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +244,10 @@ pub struct SystemStats {
     pub psram_total: usize,
     pub threads: Vec<ThreadStat>,
     pub chip: String,
+    /// Battery voltage in millivolts, when the board can measure it.
+    pub battery_mv: Option<u32>,
+    /// One-line summary of the last crash, empty if none was recorded.
+    pub last_crash: String,
 }
 
 /// A decoded image in display pixel format.
@@ -289,6 +337,11 @@ pub trait System {
     }
     /// Store a persistent setting; it survives reboots.
     fn config_set(&mut self, _key: &str, _value: &str) {}
+    /// Delete a persistent setting. The default stores an empty value,
+    /// which readers of optional settings treat as unset.
+    fn config_remove(&mut self, key: &str) {
+        self.config_set(key, "");
+    }
     /// Fill `buf` from the OS random generator (salts, keys). Returns false
     /// when no secure source exists; callers must then refuse the operation
     /// rather than fall back to predictable data.

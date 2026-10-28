@@ -29,6 +29,8 @@ const VIDEO_TICK_MS: u32 = 40;
 const MIN_TICK_MS: u32 = 4;
 const AUDIO_TICK_MS: u32 = 100;
 const IDLE_TICK_MS: u32 = 250;
+/// Tick while the screen is locked or off: the queues hold seconds of data.
+const BACKGROUND_TICK_MS: u32 = 100;
 /// Landscape controls stay visible this long after a tap.
 const OVERLAY_MS: u64 = 4000;
 
@@ -83,6 +85,14 @@ impl App for PlayerApp {
     fn fullscreen(&self) -> bool {
         self.view.fullscreen()
     }
+
+    fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+        self.view.background(sys)
+    }
+
+    fn keep_awake(&self) -> bool {
+        self.view.keep_awake()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,6 +134,22 @@ impl PlayerView {
 
     pub fn fullscreen(&self) -> bool {
         self.landscape && self.player.is_some()
+    }
+
+    /// Keep playing without drawing (screen locked or off). Audio carries
+    /// on; video pictures are consumed but not shown.
+    pub fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+        self.handle_commands(sys);
+        let p = self.player.as_mut()?;
+        p.tick(sys);
+        p.is_active().then_some(BACKGROUND_TICK_MS)
+    }
+
+    /// Video is playing: the screen should stay on.
+    pub fn keep_awake(&self) -> bool {
+        self.player.as_ref().is_some_and(|p| {
+            p.phase == Phase::Playing && !p.paused && matches!(p.presentation(), Some(Presentation::Video { .. }))
+        })
     }
 
     pub fn tick_interval_ms(&self) -> u32 {

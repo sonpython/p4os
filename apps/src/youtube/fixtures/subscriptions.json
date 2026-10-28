@@ -1,0 +1,43 @@
+{
+  "items": [
+    {
+      "snippet": {
+        "title": "Phố Cổ Walks",
+        "resourceId": {
+          "channelId": "UCp4osChannelAAAAAAAAAAA"
+        },
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_ChanAAA/mqdefault.jpg"
+          }
+        }
+      }
+    },
+    {
+      "snippet": {
+        "title": "Silicon Tinkerer",
+        "resourceId": {
+          "channelId": "UCp4osChannelCCCCCCCCCCC"
+        },
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_ChanCCC/mqdefault.jpg"
+          }
+        }
+      }
+    },
+    {
+      "snippet": {
+        "title": "Display Lab",
+        "resourceId": {
+          "channelId": "UCp4osChannelGGGGGGGGGGG"
+        },
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_ChanGGG/mqdefault.jpg"
+          }
+        }
+      }
+    }
+  ]
+}

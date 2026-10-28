@@ -116,6 +116,11 @@ impl System for HostSystem {
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
     }
+
+    fn config_remove(&mut self, key: &str) {
+        self.config.remove(key);
+    }
+
     fn spawn_worker(&mut self, name: &'static str, _core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
         let start = self.start;
         std::thread::Builder::new()
@@ -138,6 +143,14 @@ impl Worker for HostWorker {
 
     fn now_us(&self) -> u64 {
         self.start.elapsed().as_micros() as u64
+    }
+}
+
+impl HostSystem {
+    /// Answer requests whose URL contains `pattern` with a canned response
+    /// instead of going to the network (screenshots with fixture data).
+    pub fn mock(&mut self, pattern: &str, status: u16, file: PathBuf) {
+        self.net.mocks.push(Mock { pattern: pattern.into(), status, file });
     }
 }
 
@@ -321,10 +334,33 @@ impl Audio for HostAudio {
     }
 }
 
+struct Mock {
+    pattern: String,
+    status: u16,
+    file: PathBuf,
+}
+
+impl Mock {
+    fn respond(&self) -> FetchState {
+        let content_type = match self.file.extension().and_then(|e| e.to_str()) {
+            Some("json") => "application/json; charset=UTF-8",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            _ => "text/plain",
+        };
+        match std::fs::read(&self.file) {
+            Ok(body) => FetchState::Done { status: self.status, content_type: content_type.into(), body },
+            Err(e) => FetchState::Failed(format!("mock {}: {e}", self.file.display())),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HostNet {
     next: FetchId,
     fetches: HashMap<FetchId, Arc<Mutex<FetchState>>>,
+    /// Checked in order; the last matching mock wins so later script
+    /// lines can override earlier ones.
+    mocks: Vec<Mock>,
 }
 
 impl Network for HostNet {
@@ -337,43 +373,54 @@ impl Network for HostNet {
     }
 
     fn fetch(&mut self, url: &str) -> FetchId {
-        self.request(HttpRequest::get(url))
+        self.send(HttpRequest::get(url))
     }
 
-    fn request(&mut self, req: HttpRequest) -> FetchId {
+    fn send(&mut self, req: HttpRequest) -> FetchId {
         self.next += 1;
         let slot = Arc::new(Mutex::new(FetchState::Pending));
         self.fetches.insert(self.next, slot.clone());
+        if let Some(mock) = self.mocks.iter().rev().find(|m| req.url.contains(&m.pattern)) {
+            *slot.lock().unwrap() = mock.respond();
+            return self.next;
+        }
         std::thread::spawn(move || {
-            let result = http_request(req);
+            let request = http::Request { method: req.method, headers: req.headers, body: req.body };
+            let result = http_request(&req.url, request);
             *slot.lock().unwrap() = result;
         });
         self.next
     }
 
     fn poll(&mut self, id: FetchId) -> FetchState {
-        // Like the board, a finished result is handed out once.
-        let state = self.fetches.get(&id).map_or(FetchState::Failed("unknown request".into()), |s| s.lock().unwrap().clone());
-        if !matches!(state, FetchState::Pending) {
-            self.fetches.remove(&id);
-        }
-        state
+        self.fetches.get(&id).map_or(FetchState::Failed("unknown request".into()), |s| s.lock().unwrap().clone())
+    }
+
+    fn cancel(&mut self, id: FetchId) {
+        // The worker thread finishes on its own; its result is discarded.
+        self.fetches.remove(&id);
     }
 }
 
-/// HTTP/1.0 request over http:// or https://, following redirects for GET.
-fn http_request(mut req: HttpRequest) -> FetchState {
+/// An HTTP/1.0 request over http:// or https://, following redirects.
+fn http_request(url: &str, mut request: http::Request) -> FetchState {
+    if let Err(e) = request.validate() {
+        return FetchState::Failed(e);
+    }
+    let mut url = url.to_string();
     let mut redirects = 0;
-    let may_redirect = matches!(req.method.as_str(), "GET" | "HEAD");
     loop {
-        let response = Url::parse(&req.url).and_then(|target| {
-            let bytes = target.request_with(&req.method, &req.headers, &req.body)?;
+        let response = Url::parse(&url).and_then(|target| {
+            let bytes = request.encode(&target);
             let raw = if target.https { tls_exchange(&target, bytes)? } else { plain_exchange(&target, &bytes)? };
             Ok((target, http::parse_response(&raw)?))
         });
         match response {
-            Ok((target, r)) if may_redirect && r.is_redirect() && redirects < http::MAX_REDIRECTS => {
-                req.url = target.resolve(r.location.as_deref().unwrap_or("/"));
+            Ok((target, r)) if r.is_redirect() && redirects < http::MAX_REDIRECTS => {
+                url = target.resolve(r.location.as_deref().unwrap_or("/"));
+                if let Ok(next) = Url::parse(&url) {
+                    request.follow_redirect(r.status, &target, &next);
+                }
                 redirects += 1;
             }
             Ok((_, r)) => return FetchState::Done { status: r.status, content_type: r.content_type, body: r.body },

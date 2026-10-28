@@ -1,0 +1,125 @@
+{
+  "items": [
+    {
+      "id": "p4Os_Vid001",
+      "snippet": {
+        "publishedAt": "2026-10-26T01:00:00Z",
+        "channelId": "UCp4osChannelAAAAAAAAAAA",
+        "title": "Hà Nội mùa thu: 4K walking tour quanh Hồ Gươm",
+        "channelTitle": "Phố Cổ Walks"
+      },
+      "contentDetails": {
+        "duration": "PT25M24S"
+      },
+      "statistics": {
+        "viewCount": "1234567"
+      }
+    },
+    {
+      "id": "p4Os_Vid002",
+      "snippet": {
+        "publishedAt": "2026-10-25T11:30:00Z",
+        "channelId": "UCp4osChannelBBBBBBBBBBB",
+        "title": "Cách làm phở bò chuẩn vị Nam Định tại nhà",
+        "channelTitle": "Bếp Nhà Mình"
+      },
+      "contentDetails": {
+        "duration": "PT14M2S"
+      },
+      "statistics": {
+        "viewCount": "876543"
+      }
+    },
+    {
+      "id": "p4Os_Vid003",
+      "snippet": {
+        "publishedAt": "2026-10-24T16:00:00Z",
+        "channelId": "UCp4osChannelCCCCCCCCCCC",
+        "title": "Building a RISC-V computer on a breadboard, part 3",
+        "channelTitle": "Silicon Tinkerer"
+      },
+      "contentDetails": {
+        "duration": "PT48M10S"
+      },
+      "statistics": {
+        "viewCount": "312900"
+      }
+    },
+    {
+      "id": "p4Os_Vid004",
+      "snippet": {
+        "publishedAt": "2026-10-28T06:00:00Z",
+        "channelId": "UCp4osChannelDDDDDDDDDDD",
+        "title": "Trực tiếp: Bản tin thời tiết bão số 7",
+        "channelTitle": "Thời Tiết 24h"
+      },
+      "contentDetails": {
+        "duration": "P0D"
+      },
+      "statistics": {
+        "viewCount": "45120"
+      }
+    },
+    {
+      "id": "p4Os_Vid005",
+      "snippet": {
+        "publishedAt": "2026-10-20T20:00:00Z",
+        "channelId": "UCp4osChannelEEEEEEEEEEE",
+        "title": "Lofi beats to debug firmware to",
+        "channelTitle": "Night Owl Audio"
+      },
+      "contentDetails": {
+        "duration": "PT1H2M3S"
+      },
+      "statistics": {
+        "viewCount": "2400311"
+      }
+    },
+    {
+      "id": "p4Os_Vid006",
+      "snippet": {
+        "publishedAt": "2026-10-22T03:15:00Z",
+        "channelId": "UCp4osChannelFFFFFFFFFFF",
+        "title": "Top 10 bãi biển đẹp nhất miền Trung 2026",
+        "channelTitle": "Du Lịch Việt"
+      },
+      "contentDetails": {
+        "duration": "PT11M45S"
+      },
+      "statistics": {
+        "viewCount": "530220"
+      }
+    },
+    {
+      "id": "p4Os_Vid007",
+      "snippet": {
+        "publishedAt": "2026-10-18T09:00:00Z",
+        "channelId": "UCp4osChannelGGGGGGGGGGG",
+        "title": "Why your touch screen is mirrored (and how to fix it)",
+        "channelTitle": "Display Lab"
+      },
+      "contentDetails": {
+        "duration": "PT9M31S"
+      },
+      "statistics": {
+        "viewCount": "98012"
+      }
+    },
+    {
+      "id": "p4Os_Vid008",
+      "snippet": {
+        "publishedAt": "2026-10-15T23:00:00Z",
+        "channelId": "UCp4osChannelAAAAAAAAAAA",
+        "title": "Đà Lạt trong sương: timelapse 8K",
+        "channelTitle": "Phố Cổ Walks"
+      },
+      "contentDetails": {
+        "duration": "PT3M20S"
+      },
+      "statistics": {
+        "viewCount": "1010"
+      }
+    }
+  ],
+  "nextPageToken": "CBQQAA"
+}

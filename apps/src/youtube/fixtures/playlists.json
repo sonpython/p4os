@@ -1,0 +1,49 @@
+{
+  "items": [
+    {
+      "id": "PLp4osPlaylist0000000000000000001",
+      "snippet": {
+        "title": "Watch later-ish",
+        "channelTitle": "Me",
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_Src003/mqdefault.jpg"
+          }
+        }
+      },
+      "contentDetails": {
+        "itemCount": 12
+      }
+    },
+    {
+      "id": "PLp4osPlaylist0000000000000000002",
+      "snippet": {
+        "title": "Nhạc chill cuối tuần",
+        "channelTitle": "Me",
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_Vid005/mqdefault.jpg"
+          }
+        }
+      },
+      "contentDetails": {
+        "itemCount": 34
+      }
+    },
+    {
+      "id": "PLp4osPlaylist0000000000000000003",
+      "snippet": {
+        "title": "Firmware talks",
+        "channelTitle": "Me",
+        "thumbnails": {
+          "medium": {
+            "url": "https://i.ytimg.com/vi/p4Os_Src004/mqdefault.jpg"
+          }
+        }
+      },
+      "contentDetails": {
+        "itemCount": 1
+      }
+    }
+  ]
+}

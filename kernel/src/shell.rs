@@ -5,8 +5,9 @@ use crate::sync::{Mutex, Semaphore};
 use crate::{clock, console, heap, irq, kprint, kprintln, time};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Room for `wifi save` with a 32-byte SSID and a 63-character password.
-const MAX_LINE: usize = 128;
+/// Room for `wifi save` with a 32-byte SSID and a 63-character password,
+/// and for `config set` with an OAuth client ID.
+const MAX_LINE: usize = 192;
 
 pub fn run(_: usize) {
     let mut line = [0u8; MAX_LINE];
@@ -26,13 +27,23 @@ pub fn run(_: usize) {
                 kprint!("\x08 \x08");
             }
             0x20..=0x7E if len < MAX_LINE => {
+                // Typed credentials are echoed as '*' so they stay out of
+                // serial logs.
+                let echo = if typing_hidden_value(&line[..len]) { b'*' } else { byte };
                 line[len] = byte;
                 len += 1;
-                console::write_bytes(&[byte]);
+                console::write_bytes(&[echo]);
             }
             _ => {}
         }
     }
+}
+
+/// True once `typed` is `config set KEY ` for a key whose value is masked.
+fn typing_hidden_value(typed: &[u8]) -> bool {
+    let Some(rest) = typed.strip_prefix(b"config set ") else { return false };
+    let Some(space) = rest.iter().position(|&b| b == b' ') else { return false };
+    core::str::from_utf8(&rest[..space]).is_ok_and(p4os_sdk::config::is_masked)
 }
 
 /// Run a command and return its output instead of printing it. Used by
@@ -49,13 +60,17 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi lock get yt smpdemo apps run pmp"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get yt dl play stop power smpdemo apps run pmp crash"
         ),
         "flash" => crate::flash::diagnose(),
+        c if c == "power" || c.starts_with("power ") => crate::power::command(&c["power".len()..]),
+        c if c == "crash" || c.starts_with("crash ") => crate::fault::command(&c[5..]),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
         c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
         "config" | "config list" => config_list(),
+        c if c.starts_with("config set ") => config_set(c["config set ".len()..].trim()),
+        c if c.starts_with("config unset ") => config_unset(c["config unset ".len()..].trim()),
         c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
             Ok(n) => config_stress(n),
             Err(_) => kprintln!("usage: config stress N"),
@@ -78,6 +93,12 @@ fn execute(cmd: &str, serial: bool) {
         "c6" => crate::c6::probe(),
         c if c.starts_with("get ") => http_get(c[4..].trim()),
         c if c == "yt" || c.starts_with("yt ") => crate::yt::command(&c[2..]),
+        c if c.starts_with("dl ") => download(c[3..].trim()),
+        c if c.starts_with("play ") => play_file(c[5..].trim()),
+        "stop" => {
+            use p4os_sdk::Audio;
+            crate::audio::Speaker.stop();
+        }
         c if c.starts_with("tone") => {
             use p4os_sdk::Audio;
             let freq = c[4..].trim().parse().unwrap_or(1000);
@@ -102,7 +123,11 @@ fn execute(cmd: &str, serial: bool) {
             }
         }
         c if c.starts_with("bl ") => match c[3..].trim().parse::<u32>() {
-            Ok(pct) => crate::backlight::set(pct as f32 / 100.0),
+            Ok(pct) => {
+                // A lit, awake panel first; the GUI sets its own level on wake.
+                crate::power::wake_screen_blocking(1000);
+                crate::backlight::set(pct as f32 / 100.0)
+            }
             Err(_) => kprintln!("usage: bl 0..100"),
         },
         "vpg on" => crate::display::test_pattern(true),
@@ -496,6 +521,56 @@ fn http_get(url: &str) {
     }
 }
 
+/// `dl URL /sd/PATH`: fetch a URL and save the body to the SD card.
+fn download(args: &str) {
+    use p4os_sdk::FileSystem;
+    let Some((url, path)) = args.split_once(' ') else {
+        kprintln!("usage: dl URL /sd/PATH");
+        return;
+    };
+    let (url, path) = (url.trim(), path.trim());
+    let id = crate::net::fetch(url);
+    let start = crate::time::ticks();
+    loop {
+        match crate::net::poll_fetch(id) {
+            p4os_sdk::FetchState::Pending if crate::time::ticks().wrapping_sub(start) > 300_000 => {
+                kprintln!("download still pending after 300 s");
+                return;
+            }
+            p4os_sdk::FetchState::Pending => crate::sched::sleep_ms(100),
+            p4os_sdk::FetchState::Done { status, body, .. } if status == 200 => {
+                let fetched = crate::time::ticks() - start;
+                match crate::fs::SdFs.write(path, &body) {
+                    Ok(()) => kprintln!("saved {} bytes to {} (fetch {} ms, total {} ms)", body.len(), path, fetched, crate::time::ticks() - start),
+                    Err(e) => kprintln!("write {} failed: {:?}", path, e),
+                }
+                return;
+            }
+            p4os_sdk::FetchState::Done { status, .. } => {
+                kprintln!("HTTP {}: not saved", status);
+                return;
+            }
+            p4os_sdk::FetchState::Failed(e) => {
+                kprintln!("download failed: {}", e);
+                return;
+            }
+        }
+    }
+}
+
+/// `play /sd/PATH`: play an MP3 or WAV file through the speaker; `stop` ends it.
+fn play_file(path: &str) {
+    use p4os_sdk::{Audio, FileSystem};
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match crate::fs::SdFs.open(path).ok().and_then(|r| p4os_media::audio::open(name, r)) {
+        Some(src) => {
+            crate::audio::Speaker.play(src);
+            kprintln!("playing {}", path);
+        }
+        None => kprintln!("can't play {}", path),
+    }
+}
+
 /// Print the settings; secrets show only whether they are set.
 fn config_list() {
     let entries = crate::config::entries();
@@ -505,6 +580,43 @@ fn config_list() {
     for (k, v) in entries {
         let shown = if p4os_sdk::config::is_masked(&k) { "[set]" } else { v.as_str() };
         kprintln!("{} = {}", k, shown);
+    }
+}
+
+/// `config set KEY VALUE`: store a setting. Masked values (credentials)
+/// are never echoed back; `lock.*` keys are refused so the passcode only
+/// changes through Settings or `lock reset`.
+fn config_set(args: &str) {
+    let Some((key, value)) = args.split_once(' ') else {
+        kprintln!("usage: config set KEY VALUE");
+        return;
+    };
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
+    let value = value.trim();
+    if let Err(e) = p4os_sdk::config::check_entry(key, value) {
+        kprintln!("config: {} rejected: {:?}", key, e);
+        return;
+    }
+    match crate::config::set(key, value) {
+        Ok(()) if p4os_sdk::config::is_masked(key) => kprintln!("{} = [set]", key),
+        Ok(()) => kprintln!("{} = {}", key, value),
+        Err(e) => kprintln!("config: saving {} failed: {:?}", key, e),
+    }
+}
+
+fn config_unset(key: &str) {
+    if p4os_sdk::config::is_protected(key) {
+        kprintln!("config: {} can only be changed in Settings or with `lock reset`", key);
+        return;
+    }
+    match crate::config::update(|e| {
+        e.remove(key);
+    }) {
+        Ok(()) => kprintln!("{} removed", key),
+        Err(e) => kprintln!("config: removing {} failed: {:?}", key, e),
     }
 }
 

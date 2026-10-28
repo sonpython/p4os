@@ -13,6 +13,10 @@ global_asm!(
     ".equ FRAME_SIZE, 144",
     /* Must match IRQ_STACK_SIZE in link.x (checked there). */
     ".equ IRQ_STACK_SHIFT, 13",
+    /* assist_debug INTR_ENA of core 0; core 1's is 0x80 further
+       (stack_guard.rs BASE and CORE_STRIDE). */
+    ".equ STACK_GUARD_BASE, 0x3FF06000",
+    ".equ STACK_GUARD_CORE_SHIFT, 7",
     r#"
     .section .text.start, "ax"
     .global _start
@@ -23,8 +27,9 @@ _start:
     .option pop
     la sp, _stack_top
     csrci mstatus, 0x8
-    /* mscratch != 0 marks "trapped from U-mode" in _trap_vector. */
-    csrw mscratch, zero
+    /* mscratch >= 0 marks "trapped from U-mode" in _trap_vector. */
+    li t0, -1
+    csrw mscratch, t0
 
     la t0, _bss_start
     la t1, _bss_end
@@ -58,7 +63,8 @@ _start_hart1:
     la gp, __global_pointer$
     .option pop
     csrci mstatus, 0x8
-    csrw mscratch, zero
+    li t0, -1
+    csrw mscratch, t0
     la sp, _stack1_top
     li t0, 0x2000
     csrs mstatus, t0
@@ -75,10 +81,14 @@ _start_hart1:
     .global _trap_vector
 _trap_vector:
     /* While a user app runs, mscratch holds its thread's kernel stack top;
-       in M-mode it is 0. Swap, and swap back if we came from M-mode, so a
-       trap from U-mode never stores through the untrusted user sp. */
+       in M-mode it is -1. Swap, and swap back if we came from M-mode, so a
+       trap from U-mode never stores through the untrusted user sp. The
+       M-mode marker is all ones rather than 0 because the hardware stack
+       guard watches sp on every cycle: a transient sp of 0 is below any
+       bound, 0xFFFFFFFF is not (only the lower bound is armed). Kernel
+       stack tops are below 0x80000000, so the sign tells the two apart. */
     csrrw sp, mscratch, sp
-    bnez sp, 10f
+    bgez sp, 10f
     csrrw sp, mscratch, sp
 10:
     addi sp, sp, -FRAME_SIZE
@@ -113,8 +123,9 @@ _trap_vector:
     sw x30, 116(sp)
     sw x31, 120(sp)
     /* Interrupted sp: the user sp parked in mscratch (mcause.MPP = U), or
-       the M-mode sp above this frame. mscratch is 0 again afterwards. */
-    csrrw t0, mscratch, zero
+       the M-mode sp above this frame. mscratch is -1 again afterwards. */
+    li t1, -1
+    csrrw t0, mscratch, t1
     csrr t1, mcause
     srli t1, t1, 28
     andi t1, t1, 3
@@ -130,6 +141,18 @@ _trap_vector:
     csrr t0, mtval
     sw t0, 136(sp)
 
+    /* Stop this core's hardware stack guard: the handler runs on the
+       interrupt stack, below every thread stack (stack_guard.rs). The
+       read-back makes sure the write has reached the monitor, and sp below
+       depends on it, so sp cannot move to the interrupt stack before the
+       monitor is off. */
+    csrr t0, mhartid
+    slli t0, t0, STACK_GUARD_CORE_SHIFT
+    li t1, STACK_GUARD_BASE
+    add t1, t1, t0
+    sw zero, 0(t1)
+    lw t2, 0(t1)
+
     /* a0 = frame of the interrupted context; the handler returns the
        frame to resume, which may belong to a different thread. */
     /* An app may have changed gp; the kernel needs its own. */
@@ -144,10 +167,31 @@ _trap_vector:
        nest. Hart h uses the h-th stack down from _irq_stack_top. */
     csrr t0, mhartid
     slli t0, t0, IRQ_STACK_SHIFT
+    and t2, t2, zero
+    add t0, t0, t2
     la sp, _irq_stack_top
     sub sp, sp, t0
     call trap_handler
     mv sp, a0
+
+    /* Re-arm the stack guard with the bounds of the thread being resumed
+       (STACK_GUARD_ENA[hart] is 0 until the core runs a thread). Not when
+       resuming U-mode (mcause.MPP = 0): sp is then on the app's own
+       stack, outside the thread's kernel stack. */
+    csrr t0, mhartid
+    slli t1, t0, 2
+    la t2, STACK_GUARD_ENA
+    add t2, t2, t1
+    lw t2, 0(t2)
+    lw t1, 128(sp)
+    srli t1, t1, 28
+    andi t1, t1, 3
+    bnez t1, 13f
+    li t2, 0
+13: slli t0, t0, STACK_GUARD_CORE_SHIFT
+    li t1, STACK_GUARD_BASE
+    add t1, t1, t0
+    sw t2, 0(t1)
 
     lw t0, 132(sp)
     csrw mstatus, t0

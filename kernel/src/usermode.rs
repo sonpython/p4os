@@ -6,8 +6,8 @@
 //! a U-mode frame. From then on:
 //!
 //! * The thread's kernel stack top is kept in `mscratch` while it runs in
-//!   U-mode, so a trap from U-mode saves the user frame there and never
-//!   trusts the user `sp` (see `boot.rs`). The user frame therefore always
+//!   U-mode (-1 in M-mode), so a trap from U-mode saves the user frame there
+//!   and never trusts the user `sp` (see `boot.rs`). The user frame therefore always
 //!   sits at `ktop - size_of::<TrapFrame>()`.
 //! * Before every `mret` into U-mode, [`before_resume`] programs PMP so that
 //!   the app reaches only its own memory: R+X on its code, R+W on data and

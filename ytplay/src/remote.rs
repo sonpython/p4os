@@ -1,6 +1,6 @@
 //! Hand-offs between the console (`yt` shell commands, one thread) and the
 //! player (GUI thread): a small command queue, the latest statistics line,
-//! the shared visitorData, and fetches orphaned by a closed player.
+//! and the shared visitorData.
 //!
 //! Everything is lock-free (atomics only), so the shell and the GUI thread
 //! never wait on each other.
@@ -8,10 +8,8 @@
 use crate::innertube::Quality;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use p4os_sdk::FetchId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -142,24 +140,6 @@ pub fn visitor_data() -> Option<String> {
     VISITOR.get()
 }
 
-const ORPHANS: usize = 8;
-static ORPHAN: [AtomicUsize; ORPHANS] = [const { AtomicUsize::new(0) }; ORPHANS];
-
-/// Remember a fetch whose player was closed: its result must still be
-/// collected or the network layer keeps the body. Ids are never 0.
-pub fn orphan(id: FetchId) {
-    for slot in &ORPHAN {
-        if slot.compare_exchange(0, id as usize, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-            return;
-        }
-    }
-}
-
-/// Take every orphaned fetch id.
-pub fn take_orphans() -> Vec<FetchId> {
-    ORPHAN.iter().map(|s| s.swap(0, Ordering::AcqRel) as FetchId).filter(|&id| id != 0).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,11 +181,5 @@ mod tests {
         assert_eq!(stats().as_deref(), Some("b"));
         assert_eq!(stats().as_deref(), Some("b"));
 
-        orphan(5);
-        orphan(7);
-        let mut o = take_orphans();
-        o.sort();
-        assert_eq!(o, [5, 7]);
-        assert!(take_orphans().is_empty());
     }
 }

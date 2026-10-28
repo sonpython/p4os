@@ -12,7 +12,7 @@ use crate::{c6, kprintln, systimer};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 const HEADER: usize = 12;
 pub const IF_STA: u8 = 1;
@@ -23,6 +23,7 @@ const RPC_REQ: i64 = 1;
 const RPC_EVENT: i64 = 3;
 const REQ_GET_MAC: u32 = 257;
 const REQ_SET_WIFI_MODE: u32 = 260;
+const REQ_WIFI_SET_PS: u32 = 270;
 const REQ_WIFI_INIT: u32 = 278;
 const REQ_WIFI_START: u32 = 280;
 const REQ_WIFI_CONNECT: u32 = 282;
@@ -39,6 +40,9 @@ const WIFI_AUTH_WPA2_PSK: i64 = 3;
 static SEQ: AtomicU32 = AtomicU32::new(0);
 static UID: AtomicU32 = AtomicU32::new(1);
 static CONNECTED: AtomicBool = AtomicBool::new(false);
+/// Power save mode the co-processor confirmed since it was last reset
+/// (-1: not set; the slave firmware starts with power save off).
+static POWER_SAVE: AtomicI32 = AtomicI32::new(-1);
 /// Ethernet frames received for the station, consumed by the IP stack.
 pub static STA_RX: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
 /// RPC responses not yet claimed by a caller: (msg_id, payload).
@@ -46,6 +50,27 @@ static RESPONSES: Mutex<VecDeque<(u32, Vec<u8>)>> = Mutex::new(VecDeque::new());
 
 pub fn is_connected() -> bool {
     CONNECTED.load(Ordering::Relaxed)
+}
+
+/// Power save mode last applied with `set_power_save`.
+pub fn power_save() -> Option<i32> {
+    let v = POWER_SAVE.load(Ordering::Relaxed);
+    (v >= 0).then_some(v)
+}
+
+/// Set the station's power save mode (`wifi_ps_type_t`: 0 none, 1 minimum
+/// modem sleep, 2 maximum modem sleep) with ESP-Hosted `Req_WifiSetPs`.
+/// The radio sleeps between beacons and the AP buffers frames meanwhile,
+/// so the link stays up at the cost of added latency.
+pub fn set_power_save(ps: i32) -> Result<(), String> {
+    if !(0..=2).contains(&ps) {
+        return Err(alloc::format!("bad power save mode {}", ps));
+    }
+    let mut req = Writer::new();
+    req.int(1, ps as i64);
+    check("set_ps", &rpc(REQ_WIFI_SET_PS, &req)?, 1)?;
+    POWER_SAVE.store(ps, Ordering::Relaxed);
+    Ok(())
 }
 
 fn frame(if_type: u8, payload: &[u8]) -> Vec<u8> {
@@ -197,6 +222,7 @@ pub fn mac() -> Result<[u8; 6], String> {
 pub fn connect(ssid: &str, password: &str) -> Result<(), String> {
     // The co-processor is reset below, which drops any existing link.
     CONNECTED.store(false, Ordering::Relaxed);
+    POWER_SAVE.store(-1, Ordering::Relaxed);
     c6::init().map_err(|e| alloc::format!("c6 init: {:?}", e))?;
     for _ in 0..20 {
         poll().map_err(|e| alloc::format!("poll: {:?}", e))?;

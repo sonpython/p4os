@@ -1,4 +1,5 @@
-//! URLs, HTTP/1.0 GET requests, responses and redirects.
+//! URLs, HTTP/1.0 requests (GET, or any method with headers and a body),
+//! responses and redirects.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -74,43 +75,12 @@ impl Url {
 
     /// The bytes of an HTTP/1.0 GET for this URL.
     pub fn request(&self) -> Vec<u8> {
-        self.request_with("GET", &[], &[]).expect("a plain GET is always valid")
+        Request::get().encode(self)
     }
 
-    /// The bytes of an HTTP/1.0 request with extra headers and a body.
-    /// `User-Agent` and `Accept` default to p4os values unless given;
-    /// `Host`, `Accept-Encoding: identity` (bodies are never decompressed),
-    /// `Connection: close` and `Content-Length` are always set here.
-    pub fn request_with(&self, method: &str, headers: &[(String, String)], body: &[u8]) -> Result<Vec<u8>, String> {
-        if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
-            return Err(format!("bad HTTP method {method:?}"));
-        }
-        let token = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() && b != b':');
-        let value = |s: &str| !s.bytes().any(|b| b == b'\r' || b == b'\n');
-        if let Some((k, _)) = headers.iter().find(|(k, v)| !token(k) || !value(v)) {
-            return Err(format!("bad HTTP header {k:?}"));
-        }
-        const MANAGED: [&str; 4] = ["host", "connection", "content-length", "accept-encoding"];
-        let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
-        let host = if self.default_port() { self.host.clone() } else { format!("{}:{}", self.host, self.port) };
-        let mut req = format!("{method} {} HTTP/1.0\r\nHost: {host}\r\n", self.path);
-        if !has("user-agent") {
-            req.push_str("User-Agent: p4os/0.1\r\n");
-        }
-        if !has("accept") {
-            req.push_str("Accept: text/html,*/*\r\n");
-        }
-        for (k, v) in headers.iter().filter(|(k, _)| !MANAGED.iter().any(|m| k.eq_ignore_ascii_case(m))) {
-            req.push_str(&format!("{k}: {v}\r\n"));
-        }
-        req.push_str("Accept-Encoding: identity\r\nConnection: close\r\n");
-        if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
-            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        }
-        req.push_str("\r\n");
-        let mut bytes = req.into_bytes();
-        bytes.extend_from_slice(body);
-        Ok(bytes)
+    /// Value of the Host header.
+    fn host_header(&self) -> String {
+        if self.default_port() { self.host.clone() } else { format!("{}:{}", self.host, self.port) }
     }
 
     /// Resolve a `Location` header value against this URL.
@@ -131,6 +101,87 @@ impl Url {
             return format!("{}{path_only}{loc}", self.origin());
         }
         format!("{}{dir}{loc}", self.origin())
+    }
+}
+
+/// Everything about a request except its URL: method, extra headers and
+/// body. Headers the client always sends (Host, User-Agent,
+/// Accept-Encoding, Connection, Content-Length) must not be repeated here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Headers the client writes itself. User-Agent is not among them: a
+/// request may replace the default (APIs that check the client).
+const RESERVED_HEADERS: [&str; 4] = ["host", "accept-encoding", "connection", "content-length"];
+
+/// Largest body accepted, so a request always fits the socket send buffer.
+pub const MAX_BODY: usize = 2048;
+
+impl Request {
+    pub fn get() -> Self {
+        Self { method: "GET".into(), headers: Vec::new(), body: Vec::new() }
+    }
+
+    /// Reject anything that could break the request framing: methods that
+    /// are not uppercase tokens, header names or values containing control
+    /// characters (CR/LF injection), reserved headers and oversized bodies.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.method.is_empty() || !self.method.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(format!("bad HTTP method {:?}", self.method));
+        }
+        for (name, value) in &self.headers {
+            let name_ok = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            if !name_ok || RESERVED_HEADERS.iter().any(|r| name.eq_ignore_ascii_case(r)) {
+                return Err(format!("bad or reserved HTTP header {name:?}"));
+            }
+            if value.bytes().any(|b| b.is_ascii_control()) {
+                return Err(format!("control character in HTTP header {name:?}"));
+            }
+        }
+        if self.body.len() > MAX_BODY {
+            return Err(format!("request body larger than {MAX_BODY} bytes"));
+        }
+        Ok(())
+    }
+
+    /// The request bytes for `url`. Call [`Request::validate`] first.
+    pub fn encode(&self, url: &Url) -> Vec<u8> {
+        let mut head = format!("{} {} HTTP/1.0\r\nHost: {}\r\n", self.method, url.path, url.host_header());
+        if !self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent")) {
+            head.push_str("User-Agent: p4os/0.1\r\n");
+        }
+        if !self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("accept")) {
+            head.push_str("Accept: text/html,*/*\r\n");
+        }
+        for (k, v) in &self.headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("Accept-Encoding: identity\r\nConnection: close\r\n");
+        if !self.body.is_empty() || self.method != "GET" {
+            head.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
+        }
+        head.push_str("\r\n");
+        let mut out = head.into_bytes();
+        out.extend_from_slice(&self.body);
+        out
+    }
+
+    /// Adjust the request for following a redirect with `status` from
+    /// `from` to `to`: 307 and 308 repeat it, the others turn it into a
+    /// body-less GET. Credentials never follow a redirect to another origin.
+    pub fn follow_redirect(&mut self, status: u16, from: &Url, to: &Url) {
+        if from.origin() != to.origin() {
+            self.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+        }
+        if !matches!(status, 307 | 308) {
+            self.method = "GET".into();
+            self.body.clear();
+            self.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));
+        }
     }
 }
 
@@ -239,6 +290,31 @@ mod tests {
     }
 
     #[test]
+    fn detects_complete_responses() {
+        let r = b"HTTP/1.1 206 Partial\r\nContent-Length: 3\r\nConnection: keep-alive\r\n\r\nabc";
+        assert_eq!(complete_len(r), Some(r.len()));
+        assert_eq!(complete_len(&r[..r.len() - 1]), None);
+        assert_eq!(parse_response(r).unwrap().body, b"abc");
+        assert!(parse_response(&r[..r.len() - 1]).is_err());
+        // No length: only the end of the connection completes it.
+        assert_eq!(complete_len(b"HTTP/1.0 200 OK\r\n\r\nabc"), None);
+        assert_eq!(complete_len(b"HTTP/1.1 304 Not Modified\r\n\r\n"), Some(29));
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
+        assert_eq!(complete_len(chunked), Some(chunked.len()));
+        assert_eq!(complete_len(&chunked[..chunked.len() - 2]), None);
+        assert_eq!(parse_response(chunked).unwrap().body, b"abcde");
+    }
+
+    #[test]
+    fn user_agent_can_be_replaced() {
+        let mut req = Request::get();
+        req.headers.push(("User-Agent".into(), "UA/1".into()));
+        req.validate().unwrap();
+        let bytes = String::from_utf8(req.encode(&Url::parse("https://h.com/").unwrap())).unwrap();
+        assert!(bytes.contains("User-Agent: UA/1\r\n") && !bytes.contains("p4os/0.1"));
+    }
+
+    #[test]
     fn parses_schemes_ports_and_paths() {
         let u = url("https://Example.COM");
         assert_eq!((u.https, u.host.as_str(), u.port, u.path.as_str()), (true, "example.com", 443, "/"));
@@ -262,41 +338,67 @@ mod tests {
     }
 
     #[test]
-    fn builds_requests_with_headers_and_body() {
-        let headers = [
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("User-Agent".to_string(), "UA/1".to_string()),
-            ("Connection".to_string(), "keep-alive".to_string()),
-            ("Range".to_string(), "bytes=0-99".to_string()),
-        ];
-        let req = url("https://h.com/p?q").request_with("POST", &headers, b"{}").unwrap();
-        let req = String::from_utf8(req).unwrap();
-        assert!(req.starts_with("POST /p?q HTTP/1.0\r\nHost: h.com\r\n"));
-        assert!(req.contains("User-Agent: UA/1\r\n") && !req.contains("p4os/0.1"));
-        assert!(req.contains("Range: bytes=0-99\r\n"));
-        assert!(req.contains("Connection: close\r\n") && !req.contains("keep-alive"));
-        assert!(req.ends_with("Content-Length: 2\r\n\r\n{}"));
-        assert!(url("https://h.com/").request_with("get", &[], &[]).is_err());
-        let evil = [("X".to_string(), "a\r\nInjected: 1".to_string())];
-        assert!(url("https://h.com/").request_with("GET", &evil, &[]).is_err());
-        let evil = [("X: Y".to_string(), "1".to_string())];
-        assert!(url("https://h.com/").request_with("GET", &evil, &[]).is_err());
+    fn plain_get_is_unchanged() {
+        assert_eq!(
+            String::from_utf8(url("https://h.com/x?q").request()).unwrap(),
+            "GET /x?q HTTP/1.0\r\nHost: h.com\r\nUser-Agent: p4os/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        );
     }
 
     #[test]
-    fn detects_complete_responses() {
-        let r = b"HTTP/1.1 206 Partial\r\nContent-Length: 3\r\nConnection: keep-alive\r\n\r\nabc";
-        assert_eq!(complete_len(r), Some(r.len()));
-        assert_eq!(complete_len(&r[..r.len() - 1]), None);
-        assert_eq!(parse_response(r).unwrap().body, b"abc");
-        assert!(parse_response(&r[..r.len() - 1]).is_err());
-        // No length: only the end of the connection completes it.
-        assert_eq!(complete_len(b"HTTP/1.0 200 OK\r\n\r\nabc"), None);
-        assert_eq!(complete_len(b"HTTP/1.1 304 Not Modified\r\n\r\n"), Some(29));
-        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
-        assert_eq!(complete_len(chunked), Some(chunked.len()));
-        assert_eq!(complete_len(&chunked[..chunked.len() - 2]), None);
-        assert_eq!(parse_response(chunked).unwrap().body, b"abcde");
+    fn builds_post_with_headers_and_body() {
+        let req = Request {
+            method: "POST".into(),
+            headers: alloc::vec![
+                ("Content-Type".into(), "application/x-www-form-urlencoded".into()),
+                ("Accept".into(), "application/json".into()),
+            ],
+            body: b"a=1&b=2".to_vec(),
+        };
+        assert!(req.validate().is_ok());
+        let raw = String::from_utf8(req.encode(&url("https://h.com/token"))).unwrap();
+        assert!(raw.starts_with("POST /token HTTP/1.0\r\nHost: h.com\r\n"));
+        assert!(raw.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(raw.contains("Accept: application/json\r\n"));
+        assert!(!raw.contains("text/html"));
+        assert!(raw.ends_with("Content-Length: 7\r\n\r\na=1&b=2"));
+        // A body-less POST still says how long its body is.
+        let empty = Request { method: "POST".into(), headers: Vec::new(), body: Vec::new() };
+        assert!(String::from_utf8(empty.encode(&url("http://h.com/"))).unwrap().contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn rejects_unsafe_requests() {
+        let with = |k: &str, v: &str| Request { method: "GET".into(), headers: alloc::vec![(k.into(), v.into())], body: Vec::new() };
+        assert!(with("Authorization", "Bearer abc").validate().is_ok());
+        assert!(with("X-Evil", "a\r\nHost: other").validate().is_err());
+        assert!(with("Bad Name", "v").validate().is_err());
+        assert!(with("host", "other").validate().is_err());
+        assert!(with("Content-Length", "1").validate().is_err());
+        let mut r = Request::get();
+        r.method = "get".into();
+        assert!(r.validate().is_err());
+        r.method = "POST\r\n".into();
+        assert!(r.validate().is_err());
+        let big = Request { method: "POST".into(), headers: Vec::new(), body: alloc::vec![0; MAX_BODY + 1] };
+        assert!(big.validate().is_err());
+    }
+
+    #[test]
+    fn redirects_downgrade_posts() {
+        let post = Request {
+            method: "POST".into(),
+            headers: alloc::vec![("Content-Type".into(), "text/plain".into()), ("Authorization".into(), "x".into())],
+            body: b"x".to_vec(),
+        };
+        let (a, b) = (url("https://h.com/a"), url("https://other.com/b"));
+        let mut r = post.clone();
+        r.follow_redirect(307, &a, &url("https://h.com/c"));
+        assert_eq!(r, post);
+        r.follow_redirect(303, &a, &a);
+        assert_eq!((r.method.as_str(), r.body.len(), r.headers.len()), ("GET", 0, 1));
+        r.follow_redirect(302, &a, &b);
+        assert!(r.headers.is_empty(), "authorization must not leak to another origin");
     }
 
     #[test]

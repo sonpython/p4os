@@ -1,0 +1,41 @@
+# Screenshots of the example apps for docs/app-development.md.
+# Run from the repository root (aarch64 Linux host):
+#   cargo sim --script docs/screenshots/examples.sim
+# Weather answers come from fixtures in sim/fixtures/examples/, not the
+# network, so the pictures do not change from run to run.
+mock api.open-meteo.com/v1/forecast?latitude=51.51 sim/fixtures/examples/weather-london.json
+mock api.open-meteo.com/v1/forecast?latitude=21.03 sim/fixtures/examples/weather-unavailable.json 503
+launch examples
+shot docs/screenshots/example-folder.png
+# Hello Counter: first row; tap +1 three times.
+tap 240 204
+tap 388 728
+tap 388 728
+tap 388 728
+shot docs/screenshots/example-hello.png
+# Back to the list, then Lap Timer: Start, three laps, Stop.
+tap 60 118
+tap 240 312
+tap 354 372
+wait 1300
+tap 126 372
+wait 900
+tap 126 372
+wait 1500
+tap 126 372
+tap 354 372
+shot docs/screenshots/example-laps.png
+# Weather: London, then Hanoi, whose fixture is an HTTP 503 error.
+tap 60 118
+tap 240 420
+wait 500
+shot docs/screenshots/example-weather.png
+tap 353 196
+wait 500
+shot docs/screenshots/example-weather-error.png
+# Back to London, in landscape.
+tap 127 196
+wait 500
+rotate
+wait 300
+shot docs/screenshots/example-weather-landscape.png

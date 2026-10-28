@@ -50,6 +50,17 @@ impl Desktop {
 
     /// True while the lock screen is up: nothing else is drawn and no input
     /// reaches apps or system gestures.
+    /// Let the running app work while the screen is locked or off (audio
+    /// playback). Returns how soon it wants to be called again.
+    pub fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+        self.running.as_mut().and_then(|(_, app)| app.background(sys))
+    }
+
+    /// The running app asks the screen to stay on (video playing).
+    pub fn keep_awake(&self) -> bool {
+        !self.lock.is_locked() && self.running.as_ref().is_some_and(|(_, app)| app.keep_awake())
+    }
+
     pub fn is_locked(&self) -> bool {
         self.lock.is_locked()
     }
@@ -108,7 +119,9 @@ impl Desktop {
         if self.lock.is_locked() {
             let quiet = Input { pos: input.pos, down: input.down, press_pos: input.press_pos, ..Default::default() };
             let input = if just_locked { &quiet } else { input };
-            return self.lock.frame(canvas, input, &self.fonts, &self.theme, proxy.inner);
+            let next = self.lock.frame(canvas, input, &self.fonts, &self.theme, proxy.inner);
+            let bg = self.background(proxy.inner);
+            return [next, bg].into_iter().flatten().min();
         }
 
         let keyboard_was_open = self.keyboard_open;
@@ -156,10 +169,13 @@ impl Desktop {
         };
         let used = (stats.heap_used + stats.psram_used) / 1024;
         let total = (stats.heap_total + stats.psram_total) / 1024;
+        let battery = stats.battery_mv.map(|mv| format!("{}.{:02}V", mv / 1000, mv % 1000 / 10));
         let right = if r.w >= 800 {
-            format!("CPU {:>3.0}%   RAM {}K/{}K   {}", stats.cpu_load * 100.0, used, total, sys.net().status())
+            let battery = battery.map(|b| format!("   {b}")).unwrap_or_default();
+            format!("CPU {:>3.0}%   RAM {}K/{}K   {}{}", stats.cpu_load * 100.0, used, total, sys.net().status(), battery)
         } else {
-            format!("CPU {:.0}%  RAM {}M", stats.cpu_load * 100.0, used / 1024)
+            let battery = battery.map(|b| format!("  {b}")).unwrap_or_default();
+            format!("CPU {:.0}%  RAM {}M{}", stats.cpu_load * 100.0, used / 1024, battery)
         };
         let orientation = sys.orientation();
         let lockable = lock::is_configured(sys);
@@ -198,14 +214,17 @@ impl Desktop {
         // 4 columns in portrait, 6 in landscape.
         let cols = (body.w / 150).max(3);
         let cell_w = body.w / cols;
-        let cell_h = ICON + 56;
+        // Shrink the icons when the rows would not fit the screen.
+        let rows = APPS.len().div_ceil(cols as usize) as i32;
+        let cell_h = ((body.h - 48) / rows.max(1)).min(ICON + 56);
+        let icon_size = cell_h - 56;
         let top = body.y + 40;
         let mut tapped = None;
         let mut ui = self.ui(canvas, input);
         for (i, app) in APPS.iter().enumerate() {
             let (col, row) = (i as i32 % cols, i as i32 / cols);
             let cell = Rect::new(body.x + col * cell_w, top + row * cell_h, cell_w, cell_h);
-            let icon = Rect::new(cell.x + (cell.w - ICON) / 2, cell.y, ICON, ICON);
+            let icon = Rect::new(cell.x + (cell.w - icon_size) / 2, cell.y, icon_size, icon_size);
             let (held, clicked) = ui.interact(cell);
             (app.icon)(ui.canvas, icon);
             if held {
@@ -348,6 +367,9 @@ impl System for SysProxy<'_> {
     }
     fn config_set(&mut self, key: &str, value: &str) {
         self.inner.config_set(key, value)
+    }
+    fn config_remove(&mut self, key: &str) {
+        self.inner.config_remove(key)
     }
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         self.inner.fill_random(buf)

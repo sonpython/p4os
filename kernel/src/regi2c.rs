@@ -17,6 +17,10 @@ const WRITE: u32 = 1 << 24;
 pub const MPLL: u32 = 0x63;
 /// ANA_CONF2 bit selecting the MPLL block on the master.
 const MPLL_SEL: u32 = 1 << 9;
+/// Analog block id of the SAR ADCs and its ANA_CONF2 select bit
+/// (ESP-IDF `esp_rom_regi2c_esp32p4.c`).
+pub const SAR_ADC: u32 = 0x69;
+const SAR_ADC_SEL: u32 = 1 << 7;
 
 fn wait_idle() {
     while mmio::read(ANA_I2C0_CTRL) & BUSY != 0 {}
@@ -28,6 +32,7 @@ fn select(block: u32) {
     mmio::clear_bits(ANA_CONF1, 0x00FF_FFFF);
     match block {
         MPLL => mmio::set_bits(ANA_CONF2, MPLL_SEL),
+        SAR_ADC => mmio::set_bits(ANA_CONF2, SAR_ADC_SEL),
         _ => panic!("regi2c block {block:#x} not wired up"),
     }
 }
@@ -45,4 +50,11 @@ pub fn write(block: u32, reg: u32, data: u8) {
     wait_idle();
     mmio::write(ANA_I2C0_CTRL, block | (reg << 8) | WRITE | ((data as u32) << 16));
     wait_idle();
+}
+
+/// Replace bits `msb..=lsb` of register `reg` with `data`.
+pub fn write_mask(block: u32, reg: u32, msb: u32, lsb: u32, data: u8) {
+    let mask = (((1u32 << (msb - lsb + 1)) - 1) << lsb) as u8;
+    let v = (read(block, reg) & !mask) | ((data << lsb) & mask);
+    write(block, reg, v);
 }

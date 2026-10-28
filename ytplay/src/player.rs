@@ -205,7 +205,7 @@ pub struct Player {
     generation: u32,
     /// Where playback (re)starts once every stream is open.
     start_at_ms: u64,
-    /// Fetches whose result no longer matters but must still be collected.
+    /// Fetches whose result no longer matters, cancelled on the next tick.
     stale: Vec<FetchId>,
     /// Clock without audio: (media ms, uptime ms) while running.
     wall: Option<(u64, u64)>,
@@ -220,9 +220,6 @@ pub struct Player {
 
 impl Player {
     pub fn new(video_id: &str, mode: Mode, sys: &mut dyn System) -> Self {
-        for id in remote::take_orphans() {
-            let _ = sys.net().poll(id);
-        }
         let now = sys.uptime_ms();
         let mut p = Player {
             video_id: video_id.to_string(),
@@ -305,7 +302,7 @@ impl Player {
         let body = client.player_body(&self.video_id, vd.as_deref()).into_bytes();
         let mut req = HttpRequest::post(&client.player_url(), "application/json", body);
         req.headers.extend(client.headers(vd.as_deref()));
-        self.lookup = Some(sys.net().request(req));
+        self.lookup = Some(sys.net().send(req));
     }
 
     fn poll_lookup(&mut self, sys: &mut dyn System) {
@@ -702,7 +699,7 @@ impl Player {
                 (Some(i), Some(x)) => (i.0.min(x.0), i.1.max(x.1)),
                 _ => return Err(PlayError::new(ErrorKind::NoFormat, "stream without index")),
             };
-            let id = sys.net().request(HttpRequest::get(&s.format.url).range(a, b));
+            let id = sys.net().send(HttpRequest::get(&s.format.url).range(a, b));
             s.inflight = Some(Inflight { id, kind: FetchKind::Header, generation: self.generation, started_ms: now, range: (a, b) });
             return Ok(());
         }
@@ -725,7 +722,7 @@ impl Player {
         }
         let a = s.index[first].offset;
         let b = a + bytes - 1;
-        let id = sys.net().request(HttpRequest::get(&s.format.url).range(a, b));
+        let id = sys.net().send(HttpRequest::get(&s.format.url).range(a, b));
         s.inflight = Some(Inflight { id, kind: FetchKind::Segments { end }, generation: self.generation, started_ms: now, range: (a, b) });
         Ok(())
     }
@@ -818,7 +815,9 @@ impl Player {
 
     fn step(&mut self, sys: &mut dyn System) {
         let now = sys.uptime_ms();
-        self.stale.retain(|&id| matches!(sys.net().poll(id), FetchState::Pending));
+        for id in self.stale.drain(..) {
+            sys.net().cancel(id);
+        }
         self.poll_lookup(sys);
         if matches!(self.phase, Phase::Failed(_) | Phase::LookingUp) {
             return;
@@ -1108,19 +1107,14 @@ impl Player {
             sys.audio().stop();
         }
         self.stop_decoder();
-        for id in self.stale.drain(..) {
-            remote::orphan(id);
-        }
+        let mut ids: Vec<FetchId> = self.stale.drain(..).collect();
         for s in [&mut self.audio, &mut self.video].into_iter().flatten() {
-            if let Some(i) = s.inflight.take() {
-                remote::orphan(i.id);
-            }
+            ids.extend(s.inflight.take().map(|i| i.id));
         }
-        if let Some(id) = self.lookup.take() {
-            remote::orphan(id);
-        }
-        if let Some((_, id)) = self.sheets.as_mut().and_then(|s| s.fetch.take()) {
-            remote::orphan(id);
+        ids.extend(self.lookup.take());
+        ids.extend(self.sheets.as_mut().and_then(|s| s.fetch.take()).map(|(_, id)| id));
+        for id in ids {
+            sys.net().cancel(id);
         }
     }
 
