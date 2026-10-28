@@ -1,0 +1,71 @@
+{
+  "nextPageToken": "CAYQAA",
+  "items": [
+    {
+      "id": {
+        "videoId": "p4Os_Src001"
+      },
+      "snippet": {
+        "publishedAt": "2026-09-30T12:00:00Z",
+        "channelId": "UCp4osChannelCCCCCCCCCCC",
+        "title": "ESP32-P4 bare metal Rust: booting without ESP-IDF",
+        "channelTitle": "Silicon Tinkerer"
+      }
+    },
+    {
+      "id": {
+        "videoId": "p4Os_Src002"
+      },
+      "snippet": {
+        "publishedAt": "2026-08-14T08:00:00Z",
+        "channelId": "UCp4osChannelHHHHHHHHHHH",
+        "title": "Rust &amp; embedded: &quot;no_std&quot; from scratch",
+        "channelTitle": "Ferris Talks"
+      }
+    },
+    {
+      "id": {
+        "videoId": "p4Os_Src003"
+      },
+      "snippet": {
+        "publishedAt": "2026-07-02T17:45:00Z",
+        "channelId": "UCp4osChannelGGGGGGGGGGG",
+        "title": "MIPI-DSI explained in 10 minutes",
+        "channelTitle": "Display Lab"
+      }
+    },
+    {
+      "id": {
+        "videoId": "p4Os_Src004"
+      },
+      "snippet": {
+        "publishedAt": "2026-06-21T10:00:00Z",
+        "channelId": "UCp4osChannelHHHHHHHHHHH",
+        "title": "Writing a TLS client for a microcontroller",
+        "channelTitle": "Ferris Talks"
+      }
+    },
+    {
+      "id": {
+        "videoId": "p4Os_Src005"
+      },
+      "snippet": {
+        "publishedAt": "2026-05-11T19:30:00Z",
+        "channelId": "UCp4osChannelIIIIIIIIIII",
+        "title": "Smoltcp deep dive: TCP on 512 KB of RAM",
+        "channelTitle": "Net Stack Notes"
+      }
+    },
+    {
+      "id": {
+        "videoId": "p4Os_Src006"
+      },
+      "snippet": {
+        "publishedAt": "2026-04-03T02:00:00Z",
+        "channelId": "UCp4osChannelJJJJJJJJJJJ",
+        "title": "Tự làm máy tính bảng từ ESP32 &#39;siêu rẻ&#39;",
+        "channelTitle": "Điện Tử Vui"
+      }
+    }
+  ]
+}

@@ -27,6 +27,18 @@ pub const UI_ORIENTATION: &str = "ui.orientation";
 /// Backlight level in whole percent, "5".."100".
 pub const UI_BRIGHTNESS: &str = "ui.brightness";
 
+/// YouTube app: Google OAuth client ("TVs and Limited Input devices").
+pub const YOUTUBE_CLIENT_ID: &str = "youtube.client_id";
+pub const YOUTUBE_CLIENT_SECRET: &str = "youtube.client_secret";
+/// YouTube app: Data API key for browsing while signed out (optional).
+pub const YOUTUBE_API_KEY: &str = "youtube.api_key";
+/// YouTube app: OAuth refresh token, written by the app after sign-in.
+pub const YOUTUBE_REFRESH_TOKEN: &str = "youtube.refresh_token";
+/// YouTube app: two-letter region for the trending chart (default "VN").
+pub const YOUTUBE_REGION: &str = "youtube.region";
+/// YouTube app: quota units spent, "YYYY-MM-DD:units" (Pacific day).
+pub const YOUTUBE_QUOTA: &str = "youtube.quota";
+
 /// Lock screen switch, "1" or "0". The lock is only active when a passcode
 /// is stored as well.
 pub const LOCK_ENABLED: &str = "lock.enabled";
@@ -46,10 +58,18 @@ pub fn is_secret(key: &str) -> bool {
     key == WIFI_PASSWORD
 }
 
-/// Keys printed as `[set]` in listings: the secrets, plus the passcode hash,
-/// which the desktop must read back but which is never shown.
+/// Keys printed as `[set]` in listings and never echoed: the secrets, every
+/// `lock.*` key (passcode hash and lockout state) and the YouTube
+/// credentials. Apps may still read the non-[`is_secret`] ones: the desktop
+/// verifies against the passcode hash, the YouTube app uses its tokens.
 pub fn is_masked(key: &str) -> bool {
-    is_secret(key) || key == LOCK_PIN
+    is_secret(key) || is_protected(key) || matches!(key, YOUTUBE_CLIENT_SECRET | YOUTUBE_API_KEY | YOUTUBE_REFRESH_TOKEN)
+}
+
+/// Keys the shell's `config set`/`config unset` refuse: the lock state may
+/// only change through Settings or `lock reset`.
+pub fn is_protected(key: &str) -> bool {
+    key.starts_with("lock.")
 }
 
 pub type Entries = BTreeMap<String, String>;
@@ -321,11 +341,18 @@ mod tests {
 
     #[test]
     fn masked_keys() {
-        assert!(is_masked(WIFI_PASSWORD));
-        assert!(is_masked(LOCK_PIN));
-        assert!(!is_secret(LOCK_PIN), "the desktop must be able to read the hash");
-        assert!(!is_masked(LOCK_FAILS));
+        for k in [WIFI_PASSWORD, LOCK_PIN, LOCK_FAILS, LOCK_ENABLED, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN] {
+            assert!(is_masked(k), "{k}");
+        }
         assert!(!is_masked(WIFI_SSID));
+        assert!(!is_masked(YOUTUBE_CLIENT_ID));
+        assert!(!is_secret(LOCK_PIN), "the desktop must be able to read the hash");
+        assert!(!is_secret(YOUTUBE_REFRESH_TOKEN), "the app must be able to read its token");
+        assert!(is_protected(LOCK_PIN) && is_protected(LOCK_AUTO));
+        assert!(!is_protected(YOUTUBE_API_KEY) && !is_protected("locker"));
+        for k in [YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_API_KEY, YOUTUBE_REFRESH_TOKEN, YOUTUBE_REGION, YOUTUBE_QUOTA] {
+            assert!(check_entry(k, "v").is_ok(), "{k}");
+        }
     }
 
     #[test]
