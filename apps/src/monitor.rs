@@ -5,6 +5,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, Point, Rect, System, SystemStats, Ui};
 
@@ -79,6 +80,20 @@ impl Default for Monitor {
 /// empty thread list means the platform has no load figures at all.
 fn has_load(s: &SystemStats) -> bool {
     !s.threads.is_empty()
+}
+
+/// Average load, followed by each core's when there are several:
+/// "35% (12/58)".
+fn fmt_load(s: &SystemStats) -> String {
+    if !has_load(s) {
+        return DASH.to_string();
+    }
+    let avg = format!("{:.0}%", s.cpu_load * 100.0);
+    if s.core_loads.len() < 2 {
+        return avg;
+    }
+    let cores: Vec<String> = s.core_loads.iter().map(|l| format!("{:.0}", l * 100.0)).collect();
+    format!("{avg} ({})", cores.join("/"))
 }
 
 /// "3d 04:05:06", "04:05:06" or a dash when unknown.
@@ -301,7 +316,7 @@ impl App for Monitor {
         let (card_cols, card_rows) = if portrait { (2, 2) } else { (4, 1) };
         let (top, rest) = area.split_top(76 * card_rows + gap * (card_rows - 1));
         let s = &self.stats;
-        let load = if has_load(s) { format!("{:.0}%", s.cpu_load * 100.0) } else { DASH.to_string() };
+        let load = fmt_load(s);
         let mhz = if s.cpu_mhz == 0 { DASH.to_string() } else { format!("{} MHz", s.cpu_mhz) };
         let threads = if s.threads.is_empty() { DASH.to_string() } else { format!("{}", s.threads.len()) };
         let cards = [("Uptime", fmt_uptime(s.uptime_ms)), ("CPU clock", mhz), ("CPU load", load), ("Threads", threads)];
@@ -351,6 +366,25 @@ mod tests {
         let v: alloc::vec::Vec<f32> = h.samples.iter().copied().collect();
         assert_eq!(v, [0.2, 0.3, 1.0]);
         assert!((h.average().unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn load_formatting() {
+        let mut s = SystemStats::default();
+        assert_eq!(fmt_load(&s), DASH);
+        s.threads.push(p4os_sdk::ThreadStat {
+            name: "idle0".into(),
+            priority: 0,
+            state: "Ready".into(),
+            cpu_ms: 0,
+            stack_used: 0,
+            stack_size: 0,
+            core: Some(0),
+        });
+        s.cpu_load = 0.35;
+        assert_eq!(fmt_load(&s), "35%");
+        s.core_loads = alloc::vec![0.12, 0.58];
+        assert_eq!(fmt_load(&s), "35% (12/58)");
     }
 
     #[test]
