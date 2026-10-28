@@ -624,6 +624,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "p4os-abi"
+version = "0.1.0"
+
+[[package]]
 name = "p4os-apps"
 version = "0.1.0"
 dependencies = [
@@ -646,6 +650,7 @@ dependencies = [
  "fatfs",
  "getrandom",
  "libm",
+ "p4os-abi",
  "p4os-apps",
  "p4os-media",
  "p4os-mem",

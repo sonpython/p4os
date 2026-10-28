@@ -179,6 +179,17 @@ extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
     thread_exit()
 }
 
+/// Id of the thread running on the calling core, if the scheduler has
+/// started there.
+pub fn current_id() -> Option<usize> {
+    SCHED.lock().current[irq::hart_id()]
+}
+
+/// End the calling thread (as if its entry function had returned).
+pub fn exit_current() -> ! {
+    thread_exit()
+}
+
 extern "C" fn thread_exit() -> ! {
     if let Some(t) = current_mut(&mut SCHED.lock()) {
         t.state = State::Exited;

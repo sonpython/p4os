@@ -1,0 +1,9 @@
+[package]
+name = "p4os-user"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Runtime for p4os user-mode apps: entry point, syscalls, print!, panic handler"
+
+[dependencies]
+p4os-abi = { path = "../../abi" }

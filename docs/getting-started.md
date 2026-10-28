@@ -53,7 +53,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá, mật khẩu chỉ hiện `[set]`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -64,12 +64,30 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | `0x0..0x10000` | bootloader (`0x2000`), bảng phân vùng (`0x8000`) |
 | `0x10000..` | phân vùng `factory`: kernel, chạy thẳng từ flash qua cache |
 | `0x710000..0x720000` | 64 KiB đầu của phân vùng `storage`: cài đặt của kernel (`kernel/src/config.rs`) |
-| `0x720000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
+| `0x720000..0x800000` | 14 slot app user, mỗi slot 64 KiB (`scripts/flash-app.sh`); kernel chỉ đọc |
+| `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
 
 - Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
 - Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
 - Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
 - Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
+
+## App user (U-mode, cách ly bằng PMP)
+
+App user là binary riêng, không link vào kernel. Kernel nạp app từ flash vào một vùng RAM riêng rồi chạy nó ở U-mode. App chỉ đọc/ghi được vùng nhớ của chính nó và gọi kernel qua `ecall` (syscall).
+
+| Việc | Lệnh |
+|---|---|
+| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app` |
+| Ghi image vào slot N (0..13, địa chỉ 0x720000 + N×0x10000). Script tự giữ khoá board | `scripts/flash-app.sh 0 out/userapps/hello.p4app` |
+| Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
+| Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |
+
+- Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 7) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6, 8, 9) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
+- App luôn chạy trên core 1. Bootloader ESP-IDF khoá PMP entry 0–2 của core 0 (CLIC, cache controller, ROM vẫn chạm được từ U-mode), còn core 1 không bị khoá entry nào. Lệnh `pmp` in trạng thái PMP của từng core.
+- Giới hạn phần cứng: trên core 1, truy cập U-mode vào vùng CPU subsystem (0x20000000.., gồm CLIC) bị chặn nhưng **không sinh exception**, core 1 treo đến khi reset. **Đừng chạy `run 1 7`** khi người khác đang dùng board.
+- ABI syscall, định dạng image và cơ chế PMP: [plans/261028-1217-user-mode-apps/design.md](../plans/261028-1217-user-mode-apps/design.md).
+- Khi build trong git worktree, cargo gộp cả `.cargo/config.toml` của repo cha nên `-Tlink.x` bị lặp. Khi đó hãy build kernel với `RUSTFLAGS="-C link-arg=-Tlink.x"`.
 
 ## Khôi phục firmware gốc
 

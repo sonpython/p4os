@@ -46,9 +46,12 @@ fn execute(cmd: &str) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get smpdemo"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config stress N\" wifi get smpdemo apps run pmp"
         ),
         "flash" => crate::flash::diagnose(),
+        "apps" => crate::apploader::list(),
+        "pmp" => pmp_survey(),
+        c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
         "config" | "config list" => config_list(),
         c if c.starts_with("config stress") => match c["config stress".len()..].trim().parse() {
             Ok(n) => config_stress(n),
@@ -110,6 +113,40 @@ fn execute(cmd: &str) {
         "clock" => kprintln!("{}, cpu ~{} MHz", clock::dividers(), crate::measure_cpu_mhz()),
         "irq" => kprintln!("tick {} Hz, worst alarm latency {:.2} us", time::TICK_HZ, time::max_latency_us()),
         other => kprintln!("unknown command: {}", other),
+    }
+}
+
+/// `pmp`: per core, how well PMP can confine user apps (probes each core
+/// once and logs its locked entries).
+fn pmp_survey() {
+    for (hart, verdict) in crate::pmp::survey().iter().enumerate() {
+        kprintln!("core {}: {:?}", hart, verdict);
+    }
+    match crate::pmp::app_hart() {
+        Ok(h) => kprintln!("user apps run on core {}", h),
+        Err(e) => kprintln!("user apps unavailable: {}", e),
+    }
+}
+
+/// `run SLOT [ARG]`: start the user app in a flash slot and wait for it to
+/// end. The kernel logs how it ended (exit code or the fault that killed it).
+fn run_app(args: &str) {
+    let mut it = args.split_whitespace().map(str::parse::<u32>);
+    let (slot, arg) = match (it.next(), it.next(), it.next()) {
+        (Some(Ok(slot)), None, None) => (slot, 0),
+        (Some(Ok(slot)), Some(Ok(arg)), None) => (slot, arg),
+        _ => {
+            kprintln!("usage: run SLOT [ARG]");
+            return;
+        }
+    };
+    match crate::apploader::run(slot as usize, arg) {
+        Ok((_, status)) => {
+            while status.outcome().is_none() {
+                sched::sleep_ms(10);
+            }
+        }
+        Err(e) => kprintln!("run: slot {}: {}", slot, e),
     }
 }
 
