@@ -352,7 +352,7 @@ impl p4os_sdk::Network for WifiNet {
         match (wifi::is_connected(), ip()) {
             (true, Some(ip)) => format!("Wi-Fi {}", ip),
             (true, None) => "Wi-Fi (DHCP...)".into(),
-            _ => "offline".into(),
+            _ => crate::wifi_auto::describe().unwrap_or_else(|| "offline".into()),
         }
     }
 

@@ -37,6 +37,12 @@ SECTIONS
     *(.text .text.*)
   } > IROM
 
+  /* Code that must run while the flash cache is suspended (flash.rs). */
+  .sram_text : ALIGN(16)
+  {
+    *(.sram_text .sram_text.*)
+  } > SRAM
+
   .data : ALIGN(16)
   {
     __global_pointer$ = . + 0x800;

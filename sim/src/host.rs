@@ -18,6 +18,8 @@ pub struct HostSystem {
     net: HostNet,
     brightness: f32,
     pub orientation: Orientation,
+    /// Settings kept in memory for the session (the board uses flash).
+    config: HashMap<String, String>,
 }
 
 impl HostSystem {
@@ -29,6 +31,7 @@ impl HostSystem {
             net: HostNet::default(),
             brightness: 0.8,
             orientation: Orientation::Portrait,
+            config: HashMap::new(),
         }
     }
 }
@@ -89,6 +92,23 @@ impl System for HostSystem {
 
     fn set_orientation(&mut self, o: Orientation) {
         self.orientation = o;
+    }
+
+    fn wifi_connect(&mut self, ssid: &str, password: &str) {
+        // The host is already online; just remember the network.
+        self.config.insert(config::WIFI_SSID.into(), ssid.into());
+        self.config.insert(config::WIFI_PASSWORD.into(), password.into());
+    }
+
+    fn config_get(&self, key: &str) -> Option<String> {
+        if config::is_secret(key) {
+            return None;
+        }
+        self.config.get(key).cloned()
+    }
+
+    fn config_set(&mut self, key: &str, value: &str) {
+        self.config.insert(key.into(), value.into());
     }
 }
 

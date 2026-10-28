@@ -195,6 +195,8 @@ pub fn mac() -> Result<[u8; 6], String> {
 
 /// Initialise the C6 transport and Wi-Fi, then join `ssid`.
 pub fn connect(ssid: &str, password: &str) -> Result<(), String> {
+    // The co-processor is reset below, which drops any existing link.
+    CONNECTED.store(false, Ordering::Relaxed);
     c6::init().map_err(|e| alloc::format!("c6 init: {:?}", e))?;
     for _ in 0..20 {
         poll().map_err(|e| alloc::format!("poll: {:?}", e))?;

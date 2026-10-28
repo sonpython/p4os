@@ -9,9 +9,11 @@ mod backlight;
 mod boot;
 mod c6;
 mod clock;
+mod config;
 mod display;
 mod console;
 mod efuse;
+mod flash;
 mod fs;
 mod gpio;
 mod gui;
@@ -35,6 +37,7 @@ mod touch;
 mod trap;
 mod wdt;
 mod wifi;
+mod wifi_auto;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -91,6 +94,7 @@ extern "C" fn kmain() -> ! {
         kprintln!("fs: no SD card filesystem ({})", e);
     }
     time::resync();
+    config::init();
     irq::enable_global();
 
     time::sleep_ms(1000);
@@ -98,6 +102,7 @@ extern "C" fn kmain() -> ! {
     sched::spawn("shell", 2, 32 * 1024, shell::run, 0);
     audio::init();
     gui::start();
+    wifi_auto::start_from_config();
     sched::start()
 }
 
