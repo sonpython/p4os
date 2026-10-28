@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "gui", "sdk", "apps", "media", "sim"]
+members = ["kernel", "gui", "sdk", "apps", "media", "net", "sim"]
 
 [profile.release]
 opt-level = 3

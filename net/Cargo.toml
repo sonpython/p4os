@@ -1,0 +1,11 @@
+[package]
+name = "p4os-net"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Transport-independent HTTP/1.0 and TLS client logic shared by the p4os kernel and simulator"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"] }
+webpki-roots = "1"
