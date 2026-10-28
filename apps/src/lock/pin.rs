@@ -14,8 +14,8 @@ pub const MIN_LEN: usize = 4;
 pub const MAX_LEN: usize = 8;
 pub const SALT_LEN: usize = 16;
 pub const HASH_LEN: usize = 32;
-/// PBKDF2 rounds for new passcodes. Measured on the board (360 MHz RV32,
-/// release build): see `lock bench` on the serial shell.
+/// PBKDF2 rounds for new passcodes: the agreed floor. One check takes about
+/// 305 ms on the board (360 MHz, software SHA-256); measure with `lock bench`.
 pub const ITERATIONS: u32 = 10_000;
 /// Stored records outside this range are rejected: fewer rounds would be a
 /// downgrade, far more would hang the UI on every attempt.

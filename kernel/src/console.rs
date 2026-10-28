@@ -148,8 +148,10 @@ pub fn capture_end() -> alloc::string::String {
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         // An exception raised while this core holds the capture lock must
-        // still be able to report itself.
-        if CAPTURE.owner() != Some(irq::hart_id()) {
+        // still be able to report itself, and trap handlers (Ctrl-T dump,
+        // fatal exceptions) may not grow the buffer: the heap is off limits
+        // in interrupt context.
+        if !irq::in_trap() && CAPTURE.owner() != Some(irq::hart_id()) {
             if let Some(buf) = &mut *CAPTURE.lock() {
                 buf.push_str(s);
                 return Ok(());

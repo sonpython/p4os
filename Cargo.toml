@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "gui", "sdk", "apps", "media", "mem", "net", "sim", "abi"]
+members = ["kernel", "gui", "sdk", "apps", "media", "mem", "net", "sim", "abi", "tlsf"]
 # User-mode apps build for the bare-metal target in their own workspace.
 exclude = ["userapps"]
 

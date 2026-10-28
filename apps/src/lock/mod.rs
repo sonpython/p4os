@@ -130,6 +130,17 @@ pub fn is_configured<E: Env + ?Sized>(env: &E) -> bool {
     is_enabled(env) && has_passcode(env)
 }
 
+/// Progress of a submitted passcode on the lock screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Checking {
+    #[default]
+    Idle,
+    /// Enter was pressed; the next frame shows "Checking...".
+    Requested,
+    /// That frame is on screen; the following one runs the check.
+    Shown,
+}
+
 /// Lock state owned by the desktop.
 #[derive(Default)]
 pub struct Lock {
@@ -144,6 +155,7 @@ pub struct Lock {
     throttle: Throttle,
     /// When the last wrong passcode was entered (uptime ms), for feedback.
     wrong_at: Option<u64>,
+    checking: Checking,
     ui: UiState,
 }
 
@@ -160,6 +172,7 @@ impl Lock {
         self.locked = true;
         self.entry.clear();
         self.wrong_at = None;
+        self.checking = Checking::Idle;
         self.ui = UiState::default();
         self.throttle = Throttle::load(env);
     }
