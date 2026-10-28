@@ -41,13 +41,28 @@ A built-in `youtube` app (`apps/src/youtube/`) with tabs Home / Search / Library
 - Flash writes of `youtube.refresh_token` / `youtube.quota` from the GUI thread (same path the Settings app already uses).
 - The rendered QR codes were not scanned (no decoder on the host); the encoder is Nayuki's library and the render test checks finder patterns and the quiet zone.
 
+## Merge with main (d7905b9: TLSF heap, user-mode apps, lock screen)
+
+- One masking list: `config::is_masked()` (main's name) covers `wifi.password`, every `lock.*` key, `youtube.client_secret`, `youtube.api_key` and `youtube.refresh_token`. `config list`, `config set` output and the typed-value echo all use it. My `is_hidden()` was folded into it.
+- `config::is_protected()`: `config set` and `config unset` refuse `lock.*`, so the passcode only changes through Settings or `lock reset`.
+- Both SDK hooks kept: `fill_random`/`lock_now` from main, `config_remove` from this branch; desktop proxy, kernel and simulator implement all of them. The simulator's `config` command keeps main's frame-after-set and accepts values with spaces; `lock` and `mock` both exist.
+- New `Network::cancel(id)` (default no-op). Kernel: `net::cancel` removes the result slot and any queued request; the net thread drops jobs whose slot is gone and closes their sockets; `finish` no longer recreates a cancelled slot. The YouTube app cancels API, token and thumbnail requests in `on_close`; the Browser cancels the page it was loading.
+- Home without an API key or account now shows "No API key set" with the exact `config set youtube.api_key <KEY>` command (`docs/screenshots/youtube-no-key.png`).
+- Host: 191 tests pass across the four crates, zero warnings. Kernel (`RUSTFLAGS="-C link-arg=-Tlink.x"`) and simulator release builds are clean.
+
+## Board smoke test (merged kernel, 2026-10-28 17:31 UTC, inside scripts/board-lock.sh)
+
+No real credentials were set; the only test value (`youtube.client_secret smoke-test`) was removed again.
+
+- Boot: Wi-Fi, DHCP and SNTP OK; `lock` reports off, no passcode.
+- `config set lock.auto ...` and `config unset lock.pin` are refused ("can only be changed in Settings or with `lock reset`"); the typed values echo as `*`.
+- `config set youtube.client_secret smoke-test` echoes `**********`, answers `youtube.client_secret = [set]`, `config list` shows `[set]`; `config unset` removes it.
+- Tapping the 13th launcher icon opens YouTube; the camera capture shows "No API key set", the `config set youtube.api_key` hint, the Account button and the tab bar. `ps` afterwards: GUI and net threads healthy, no app-side network activity without a key.
+- Not exercised on the board: real API calls, sign-in and request cancellation with live connections (cancel is covered by host tests and the kernel build).
+- The serial helper used for slow typing now has a write timeout, and every step of the smoke script runs under `timeout`, after an earlier version hung while holding the board lock.
+
 ## Known limitations
 
-- Requests still in flight when the app closes leave their results in the kernel's result map (no cancel API); the Browser has the same behaviour.
 - Search in landscape with the keyboard open leaves little room for results.
 - Typing `config set` through the Terminal app shows the value in the Terminal's own input line (the serial echo is masked).
-
-## Unresolved questions
-
-- Should apps get a fetch-cancel API in the kernel so closed apps release in-flight responses?
-- Default region is `VN`; change if the user prefers another trending chart.
+- Long shell lines written to the serial port in one burst lose characters (seen with `shell-session.py`); typed at human speed, or one character per 10 ms, they arrive intact.
