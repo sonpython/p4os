@@ -21,12 +21,15 @@ pub const CLIC_CTRL: usize = 0x2080_1000;
 /// Peripheral interrupt sources (index into the interrupt matrix).
 pub mod source {
     pub const USB_SERIAL_JTAG: usize = 22;
+    pub const TG0_WDT: usize = 48;
     pub const SYSTIMER_TARGET0: usize = 53;
     pub const SYSTIMER_TARGET1: usize = 54;
     pub const DW_GDMA: usize = 24;
     pub const AHB_PDMA_OUT_CH0: usize = 59;
     /// CPU-to-CPU interrupts, raised by writing HP_SYS CPU_INT_FROM_CPU_n.
     pub const FROM_CPU0: usize = 79;
+    /// assist_debug (stack guard), shared by both cores' monitors.
+    pub const ASSIST_DEBUG: usize = 127;
     /// Number of sources routed by the interrupt matrix.
     pub const COUNT: usize = 128;
 }

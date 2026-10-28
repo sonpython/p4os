@@ -204,5 +204,6 @@ extern "C" fn kmain_hart1() -> ! {
     irq::clear_matrix();
     irq::init();
     init_ipi();
+    crate::init_fault_handling();
     sched::start()
 }

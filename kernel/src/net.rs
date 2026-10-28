@@ -212,8 +212,10 @@ fn run(mac_lo: usize) {
     let mut jobs: Vec<Job> = Vec::new();
     // Tick at which the current DHCP lease was obtained.
     let mut configured_at = 0;
+    let watch = crate::wdt::watch("net", 20_000);
 
     loop {
+        watch.checkin();
         if let Err(e) = wifi::poll() {
             kprintln!("net: poll failed: {:?}", e);
         }

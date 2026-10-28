@@ -32,8 +32,10 @@ fn run(_: usize) {
     let mut sys = KernelSystem::restored();
     let mut input = Input::default();
     let mut next_frame_at = 0u64;
+    let watch = crate::wdt::watch("gui", 15_000);
 
     loop {
+        watch.checkin();
         let forced = display::OVERRIDE.load(core::sync::atomic::Ordering::Relaxed);
         if forced != 0 {
             buffers[0].pixels().fill(forced as u16);
@@ -312,6 +314,7 @@ impl System for KernelSystem {
             psram_used,
             psram_total,
             threads,
+            last_crash: crate::fault::last_crash(),
             chip: format!("ESP32-P4 v{}.{}, frame {} us + present {} us", crate::efuse::chip_revision().0, crate::efuse::chip_revision().1, self.last_frame_us, self.last_present_us),
         }
     }
@@ -330,7 +333,8 @@ impl System for KernelSystem {
     }
 
     fn run_command(&mut self, line: &str) -> String {
-        crate::shell::capture(line)
+        // Terminal commands may legitimately run for long (format, bench).
+        crate::wdt::busy(|| crate::shell::capture(line))
     }
 
     fn launch(&mut self, _app_id: &str) {}

@@ -21,7 +21,7 @@
 use crate::boot::TrapFrame;
 use crate::irq::{self, HART_COUNT};
 use crate::spin::SpinLock;
-use crate::{kprintln, smp, time};
+use crate::{smp, time};
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -581,9 +581,9 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
         let t = s.threads[cur].as_mut().unwrap();
         t.frame = frame;
         if unsafe { t.stack_bottom.read() } != STACK_CANARY {
-            kprintln!("*** stack overflow in thread '{}' on hart {}", t.name, hart);
-            crate::halt();
-        }    }
+            crate::fault::stack_canary(unsafe { &*frame }, t.name, t.stack_bottom as usize, t.stack_size);
+        }
+    }
 
     let next = pick_next(s, hart);
     s.current[hart] = Some(next);
@@ -605,6 +605,7 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
     t.on_cpu = Some(hart);
     t.last_cpu = Some(hart);
     t.slice_used = 0;
+    crate::fault::on_switch(hart, t.name, t.stack_bottom as usize, t.stack_size);
     t.frame
 }
 
@@ -734,4 +735,31 @@ fn stack_high_water(bottom: *const u32, size: usize) -> usize {
     let untouched =
         (1..words).take_while(|&i| unsafe { bottom.add(i).read_volatile() } == STACK_FILL).count();
     size - (untouched + 1) * 4
+}
+
+/// Where a thread stands, for crash reports.
+pub struct Context {
+    /// pc, ra and sp saved when it last left a core (stale while running).
+    pub pc: u32,
+    pub ra: u32,
+    pub sp: u32,
+    pub stack: (usize, usize),
+    pub on_cpu: Option<usize>,
+    pub last_cpu: Option<usize>,
+}
+
+/// Context of the thread called `name`. Gives up if the scheduler lock
+/// stays taken.
+pub fn context_of(name: &str) -> Option<Context> {
+    let s = SCHED.try_lock_for(100_000)?;
+    let t = s.threads.iter().flatten().find(|t| t.name == name)?;
+    let f = unsafe { &*t.frame };
+    Some(Context {
+        pc: f.mepc,
+        ra: f.regs[0],
+        sp: f.regs[1],
+        stack: (t.stack_bottom as usize, t.stack_bottom as usize + t.stack_size),
+        on_cpu: t.on_cpu,
+        last_cpu: t.last_cpu,
+    })
 }

@@ -60,9 +60,10 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp crash"
         ),
         "flash" => crate::flash::diagnose(),
+        c if c == "crash" || c.starts_with("crash ") => crate::fault::command(&c[5..]),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
         c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),

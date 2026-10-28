@@ -10,7 +10,8 @@ Status: implemented (first step). Code: `kernel/src/usermode.rs`, `pmp.rs`,
 - While a thread runs in U-mode, `mscratch` holds its kernel stack top. The
   trap entry swaps it in, so a trap from U-mode never stores through the
   user `sp`; the user frame always lives at `ktop - 144`. In M-mode
-  `mscratch` is 0. The trap entry also reloads the kernel `gp`.
+  `mscratch` is -1 (not 0: the hardware stack guard would see the
+  transient sp of 0 during the swap as an overflow). The trap entry also reloads the kernel `gp`.
 - Syscalls and faults are not served in trap context. The trap handler
   builds an M-mode frame just below the user frame that runs the syscall (or
   the kill path) in the app's own thread, on its kernel stack, with
@@ -54,7 +55,7 @@ watchdog for core 1 or a debugger-free way to recover it; not attempted.
 
 ## SMP integration
 
-- Both harts zero `mscratch` at start (`_start`, `_start_hart1`); the U-mode
+- Both harts set `mscratch` to -1 at start (`_start`, `_start_hart1`); the U-mode
   kernel-stack switch happens before the per-hart IRQ stack is selected.
 - `tp` is unused by the kernel, so only `gp` is reloaded on trap entry.
 - `sched::current_id()` reads the calling hart's current thread under the

@@ -36,9 +36,11 @@ SECTIONS
 
   .text : ALIGN(64)
   {
+    _text_start = .;
     KEEP(*(.trap_vector))
     *(.text.start)
     *(.text .text.*)
+    _text_end = .;
   } > IROM
 
   /* Code that must run while the flash cache is suspended (flash.rs). */
