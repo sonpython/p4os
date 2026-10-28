@@ -1,7 +1,8 @@
 //! Kernel tick built on the systimer alarm.
 //!
 //! The alarm is re-armed relative to the previous deadline rather than to
-//! "now", so interrupt latency does not accumulate as drift.
+//! "now", so interrupt latency does not accumulate as drift. The alarm
+//! interrupt is attached on core 0 and drives scheduling for both cores.
 
 use crate::{irq, sched, soc, systimer};
 use core::cell::UnsafeCell;
@@ -12,8 +13,8 @@ const TICK_PERIOD: u64 = systimer::TICKS_PER_US * 1_000_000 / TICK_HZ;
 const LINE: usize = 16;
 const LEVEL: u32 = 3;
 
-/// Next alarm deadline. RV32 has no 64-bit atomics; this is only touched by
-/// `init` (before the interrupt is attached) and by the alarm handler.
+/// Next alarm deadline. RV32 has no 64-bit atomics; this is only touched on
+/// core 0, by `init` and `resync` during boot and by the alarm handler.
 struct Deadline(UnsafeCell<u64>);
 unsafe impl Sync for Deadline {}
 static NEXT_DEADLINE: Deadline = Deadline(UnsafeCell::new(0));
@@ -48,9 +49,7 @@ fn on_alarm() {
     let missed = arm_after(deadline + TICK_PERIOD);
     TICKS.fetch_add(missed, Ordering::Relaxed);
     let now_tick = TICKS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    if sched::on_tick(now_tick) {
-        sched::request_resched();
-    }
+    sched::on_tick(now_tick);
 }
 
 pub fn init() {

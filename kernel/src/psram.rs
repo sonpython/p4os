@@ -248,10 +248,22 @@ fn map(size: usize) {
     cache_invalidate(BASE, size);
 }
 
+/// Serialises the cache sync engine, which both cores share: the ROM
+/// helpers program its address/size/control registers in several steps.
+static CACHE_OP: crate::spin::SpinLock<()> = crate::spin::SpinLock::new(());
+/// Work done per lock hold, so the other core and interrupts never wait
+/// long behind a framebuffer-sized operation.
+const CACHE_OP_CHUNK: usize = 32 * 1024;
+
 fn rom_cache_op(rom_fn: usize, addr: usize, size: usize) {
-    unsafe {
-        let f: unsafe extern "C" fn(u32, u32, u32) -> i32 = core::mem::transmute(rom_fn);
-        f(CACHE_MAP_L1D_L2, addr as u32, size as u32);
+    let f: unsafe extern "C" fn(u32, u32, u32) -> i32 = unsafe { core::mem::transmute(rom_fn) };
+    let end = addr + size;
+    let mut at = addr;
+    while at < end {
+        let len = (end - at).min(CACHE_OP_CHUNK);
+        let _guard = CACHE_OP.lock();
+        unsafe { f(CACHE_MAP_L1D_L2, at as u32, len as u32) };
+        at += len;
     }
 }
 

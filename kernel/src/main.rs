@@ -27,7 +27,9 @@ mod rtc;
 mod sched;
 mod sdmmc;
 mod shell;
+mod smp;
 mod soc;
+mod spin;
 mod sync;
 mod systimer;
 mod time;
@@ -84,6 +86,7 @@ extern "C" fn kmain() -> ! {
         Err(e) => kprintln!("psram: init failed: {:?}", e),
     }
     irq::init();
+    smp::init_ipi();
     time::init();
     console::init_rx();
     i2c::init();
@@ -98,6 +101,7 @@ extern "C" fn kmain() -> ! {
     sched::spawn("shell", 2, 32 * 1024, shell::run, 0);
     audio::init();
     gui::start();
+    smp::start_core1();
     sched::start()
 }
 

@@ -1,10 +1,11 @@
 //! Kernel console over the on-chip USB-Serial-JTAG controller.
 
+use crate::spin::SpinLock;
 use crate::sync::Semaphore;
 use crate::{irq, mmio, soc};
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const EP1: usize = soc::USB_SERIAL_JTAG;
 const EP1_CONF: usize = soc::USB_SERIAL_JTAG + 0x4;
@@ -85,14 +86,22 @@ pub fn read_byte() -> Option<u8> {
 /// drains, and the kernel must keep running instead of hanging on output.
 const FIFO_TIMEOUT: u32 = 50_000;
 
+/// Set after a timeout: until the FIFO drains again, output is dropped
+/// without spinning, so printing (done with interrupts masked) stays cheap
+/// when nobody listens.
+static HOST_GONE: AtomicBool = AtomicBool::new(false);
+
 fn write_byte(byte: u8) -> bool {
+    let budget = if HOST_GONE.load(Ordering::Relaxed) { 1 } else { FIFO_TIMEOUT };
     let mut spins = 0;
     while mmio::read(EP1_CONF) & IN_EP_DATA_FREE == 0 {
         spins += 1;
-        if spins == FIFO_TIMEOUT {
+        if spins >= budget {
+            HOST_GONE.store(true, Ordering::Relaxed);
             return false;
         }
     }
+    HOST_GONE.store(false, Ordering::Relaxed);
     mmio::write(EP1, byte as u32);
     true
 }
@@ -112,32 +121,30 @@ pub fn write_bytes(bytes: &[u8]) {
 pub struct Console;
 
 /// When set, kernel output is collected here instead of going to USB (used
-/// to show shell command output inside the Terminal app).
-struct Capture(UnsafeCell<Option<alloc::string::String>>);
-unsafe impl Sync for Capture {}
-static CAPTURE: Capture = Capture(UnsafeCell::new(None));
+/// to show shell command output inside the Terminal app). Also serialises
+/// output from the two cores, so each `write_str` lands in one piece.
+static OUTPUT: SpinLock<Option<alloc::string::String>> = SpinLock::new(None);
 
 pub fn capture_start() {
-    irq::free(|| unsafe { *CAPTURE.0.get() = Some(alloc::string::String::new()) });
+    *OUTPUT.lock() = Some(alloc::string::String::new());
 }
 
 pub fn capture_end() -> alloc::string::String {
-    irq::free(|| unsafe { (*CAPTURE.0.get()).take().unwrap_or_default() })
+    OUTPUT.lock().take().unwrap_or_default()
 }
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let captured = irq::free(|| unsafe {
-            match &mut *CAPTURE.0.get() {
-                Some(buf) => {
-                    buf.push_str(s);
-                    true
-                }
-                None => false,
-            }
-        });
-        if !captured {
+        // An exception raised while this core is printing must still be
+        // able to report itself, so print unlocked in that case.
+        if OUTPUT.owner() == Some(irq::hart_id()) {
             write_bytes(s.as_bytes());
+            return Ok(());
+        }
+        let mut out = OUTPUT.lock();
+        match &mut *out {
+            Some(buf) => buf.push_str(s),
+            None => write_bytes(s.as_bytes()),
         }
         Ok(())
     }
