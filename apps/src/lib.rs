@@ -23,6 +23,7 @@ pub mod clock;
 pub mod paint;
 pub mod game2048;
 pub mod youtube;
+pub mod examples;
 
 use p4os_sdk::AppInfo;
 
@@ -40,4 +41,5 @@ pub static APPS: &[AppInfo] = &[
     paint::INFO,
     game2048::INFO,
     youtube::INFO,
+    examples::INFO,
 ];

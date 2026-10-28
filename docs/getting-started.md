@@ -2,6 +2,8 @@
 
 p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x**. Board mục tiêu là **Guition JC4880P443C**: màn 4,3" 480×800 ST7701S, cảm ứng GT911, codec ES8311, chip Wi-Fi ESP32-C6. Nó không dùng esp-hal, ESP-IDF hay FreeRTOS.
 
+Muốn viết app (app tích hợp hoặc app user cách ly), xem [app-development.md](app-development.md): hướng dẫn bằng tiếng Anh, có tóm tắt tiếng Việt ở đầu, kèm các app mẫu trong `apps/src/examples/` và `userapps/ticker/`.
+
 ## Yêu cầu
 
 - Rust stable kèm target `riscv32imafc-unknown-none-elf` (khai báo trong `rust-toolchain.toml`).
@@ -27,9 +29,9 @@ Thư mục build của cargo là `out/` (cấu hình trong `.cargo/config.toml`)
 1. ROM nạp bootloader cấp 2 ESP-IDF v5.5 có sẵn ở 0x2000. Phần này tạm thời vẫn giữ.
 2. Bootloader ánh xạ hai segment flash: rodata cùng app descriptor ở `0x40000020`, code ở `0x41000040`. Sau đó nó nhảy vào `_start` (`kernel/src/boot.rs`).
 3. Kernel làm các bước sau:
-   - tắt các watchdog;
+   - nhận quyền watchdog từ bootloader: tắt MWDT của bootloader, đặt lại RWDT 15 s (xem "Khôi phục khi lỗi");
    - nâng CPU từ 90 MHz lên 360 MHz;
-   - bật CLIC và tick 1 kHz;
+   - bật CLIC và tick 1 kHz (tick dừng khi cả hai core rảnh, xem mục "Quản lý năng lượng");
    - đánh thức core 1 (hart 1), log in `smp: hart 1 online`;
    - khởi động scheduler. Cả hai core cùng lấy thread từ một hàng đợi; mỗi core có thread `idle0`/`idle1` riêng.
 
@@ -78,7 +80,7 @@ Mở cổng serial mà **không đổi DTR/RTS**. Nếu chỉ đổi một trong
 
 ## Shell debug
 
-Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `screenshot [fast|raw]` / `screenshot sd [TÊN]` (chụp màn hình, xem mục Chụp màn hình ngay trên board). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
+Các lệnh: `help`, `uptime`, `clock`, `irq`, `ps` (kèm tải từng core, core đang/vừa chạy thread và core được ghim), `mem` (kèm mức dùng heap cao nhất kể từ lần `mem` trước và số stack đang chờ trong pool), `demo`, `smpdemo` (so sánh thông lượng 1 thread với 2 thread chạy song song), `membench`, `bench` (micro-benchmark kernel và CPU, so sánh với FreeRTOS: xem `bench/README.md`), `lcd` (trạng thái luồng hình), `hwscan` (dò phần cứng), `vpg on|off` (vạch màu thử của DSI host), `fill RRGGBB|off` (tô toàn màn hình một màu), `bl 0..100` (độ sáng đèn nền), `tap X Y` (giả lập một lần chạm), `sd` (dò thẻ SD), `ls [/sd/...]` (liệt kê thư mục), `format sd ERASE-ALL` (xoá thẻ và format theo chuẩn p4os: MBR với một phân vùng FAT32 bắt đầu ở 1 MiB, nhãn `P4OS`, có sẵn các thư mục `Music`, `Pictures`, `Documents`, `Notes`, `Paint`, `Apps`, `p4os`), `audio` (trạng thái âm thanh), `tone [Hz]` (phát âm thử 3 giây), `c6` (dò chip Wi-Fi), `wifi connect SSID PASS` (kết nối, không lưu), `get http://...` (tải một URL), `flash` (trạng thái driver flash và MMU), `power` (chế độ năng lượng, xem mục Quản lý năng lượng), `apps`, `run SLOT [ARG]`, `pmp` (app user, xem bên dưới), `lock` (trạng thái màn hình khoá), `lock now` (khoá ngay), `lock bench` (đo thời gian một lần kiểm tra mã), `lock reset CLEAR-PASSCODE` (xoá mã, xem mục Màn hình khoá), `screenshot [fast|raw]` / `screenshot sd [TÊN]` (chụp màn hình, xem mục Chụp màn hình ngay trên board), `crash` (báo cáo lỗi lần trước, xem "Khôi phục khi lỗi"), `dl URL /sd/ĐƯỜNG_DẪN` (tải file về thẻ SD), `play /sd/ĐƯỜNG_DẪN` / `stop` (phát/dừng MP3 hoặc WAV). Cài đặt lưu trong flash: `wifi save SSID PASS` (lưu rồi kết nối), `wifi forget` (xoá mạng đã lưu), `wifi` (trạng thái), `config list` (in các khoá; mật khẩu Wi-Fi, các khoá `lock.*` và khoá bí mật của YouTube chỉ hiện `[set]`), `config set KEY VALUE` (ghi một khoá; giá trị của khoá bí mật hiện thành `*` khi gõ và không bao giờ được in lại; các khoá `lock.*` bị từ chối, mã khoá chỉ đổi được trong Settings hoặc bằng `lock reset`), `config unset KEY` (xoá một khoá, trừ `lock.*`), `config stress N` (lưu N lần một khoá thử trong lúc hai thread giữ bận cả hai core, rồi xoá khoá đó và kiểm tra các khoá khác còn nguyên). Nhấn **Ctrl-T** bất cứ lúc nào để in bảng thread ngay từ ngữ cảnh ngắt, kể cả khi mọi thread đã treo.
 
 ## Cài đặt lưu trong flash
 
@@ -93,7 +95,7 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | `0x800000..0xD10000` | phần còn lại của `storage`, dành cho việc khác; kernel không đụng tới |
 
 - Cài đặt nằm ở hai sector 4 KiB luân phiên (`0x710000`, `0x711000`). Mỗi bản ghi có số thứ tự và CRC-32; lúc khởi động kernel chọn bản ghi hợp lệ mới nhất, nên mất điện giữa lúc ghi chỉ làm mất lần lưu đó. Định dạng nằm ở `sdk/src/config.rs`.
-- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá), và các khoá `youtube.*` của app YouTube (xem mục App YouTube). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
+- Các khoá: `wifi.ssid`, `wifi.password`, `ui.orientation` (`portrait`/`landscape`), `ui.brightness` (phần trăm), `lock.enabled`, `lock.pin`, `lock.auto`, `lock.fails`, `lock.until` (xem mục Màn hình khoá), và các khoá `youtube.*` của app YouTube (xem mục App YouTube), `power.mode` (`performance`/`balanced`/`battery`, mặc định `balanced`), `power.dim_s` và `power.off_s` (số giây không thao tác trước khi giảm sáng / tắt màn hình, `0` = không bao giờ, mặc định 30 và 120). Hướng màn hình được lưu ngay khi đổi; độ sáng được lưu sau khi thanh trượt đứng yên 1,5 giây.
 - Nếu đã lưu mạng Wi-Fi, lúc khởi động thread `wifi-auto` tự kết nối ở nền, không chặn boot. Khi lỗi nó thử lại sau 5 s, 10 s, 20 s… tối đa 2 phút. App Settings, mục Wi-Fi, có ô SSID/mật khẩu và nút Connect (lưu rồi kết nối).
 - Xoá/ghi flash chạy từ SRAM (section `.sram_text` trong `kernel/link.x`), với ngắt bị chặn và L2 cache tạm dừng, vì kernel đang chạy từ chính flash này. Thread gọi ghi phải có stack trong SRAM nội.
 
@@ -104,11 +106,49 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 | ![](screenshots/lock-portrait.png) | ![](screenshots/lock-wrong.png) | ![](screenshots/lock-lockout.png) | ![](screenshots/lock-landscape.png) |
 
 - Bật trong Settings > Security: công tắc **Lock screen**, nút **Set passcode** (hoặc **Change** / **Remove** khi đã có mã), và **Auto-lock**: `Screen off` (mặc định), `1 min`, `5 min`, `Never`. Mã là 4–8 chữ số, nhập hai lần để xác nhận. Bật công tắc khi chưa có mã thì sẽ chuyển sang bước đặt mã; đổi mã, xoá mã hay tắt khoá đều phải nhập mã hiện tại.
-- Màn hình khoá chỉ hoạt động khi đã bật **và** đã có mã. Nó hiện lúc khởi động, khi chạm biểu tượng ổ khoá trên thanh trạng thái (hoặc lệnh `lock now`), và tự khoá theo Auto-lock. Chừng nào phần quản lý nguồn chưa báo sự kiện tắt màn hình, chế độ `Screen off` tạm dùng mốc 1 phút không chạm. `1 min` / `5 min` tính từ lần chạm cuối.
+- Màn hình khoá chỉ hoạt động khi đã bật **và** đã có mã. Nó hiện lúc khởi động, khi chạm biểu tượng ổ khoá trên thanh trạng thái (hoặc lệnh `lock now`), và tự khoá theo Auto-lock. Chế độ `Screen off` khoá khi màn hình tắt theo `power.off_s` (mục Quản lý năng lượng); trước lần tắt màn hình đầu tiên sau khi khởi động, nó vẫn dùng mốc dự phòng 1 phút không chạm. Nếu đặt `power.off_s` = 0 thì màn hình không tắt và sau lần đầu đó khoá không tự bật. `1 min` / `5 min` tính từ lần chạm cuối.
 - Khi khoá, không phần nào của app hay thanh trạng thái được vẽ và không app nào nhận chạm; app vẫn chạy nền (ví dụ nhạc vẫn phát). Lần chạm đánh thức màn hình không được tính là phím.
 - Mã không bao giờ được lưu dạng rõ: `lock.pin` chứa `v1$<số vòng>$<salt>$<hash>`, là PBKDF2-HMAC-SHA256 với salt ngẫu nhiên 16 byte lấy từ bộ sinh số ngẫu nhiên của chip, 10 000 vòng; so sánh hash theo thời gian hằng. Mã và hash không bao giờ được in ra serial. Trên board (360 MHz, SHA-256 bằng phần mềm) một lần kiểm tra mất khoảng 305 ms (`lock bench`); màn hình khoá hiện "Checking..." trong lúc đó.
 - Giới hạn thử: sau 5 lần sai bị khoá 30 giây, mỗi 5 lần sai tiếp theo thời gian gấp đôi (60 s, 120 s, …), tối đa 15 phút. Số lần sai (`lock.fails`) và lần khoá đang chờ (`lock.until`) được lưu trong flash nên khởi động lại không xoá được: nếu đồng hồ đã đặt, thời điểm hết khoá được giữ nguyên; nếu chưa, lần khoá bắt đầu lại từ đầu sau khi khởi động. Nhập sai mã hiện tại trong Settings cũng bị tính và có thể khoá màn hình.
 - **Quên mã**: trên console serial gõ `lock reset`, rồi `lock reset CLEAR-PASSCODE`. Lệnh xoá mã, tắt khoá và xoá bộ đếm. Lệnh này bị từ chối khi chạy từ app Terminal. Giới hạn cần nói rõ: console serial (cổng USB) được coi là giao diện tin cậy, nên ai cầm được board và cắm cáp đều mở được khoá. Ngoài ra flash không mã hoá, nên người có quyền truy cập vật lý có thể đọc hash và dò mã ngoại tuyến (mã 4–8 chữ số có ít khả năng). Màn hình khoá chống người lạ dùng màn hình cảm ứng, không chống người có cáp và thời gian.
+
+## Quản lý năng lượng
+
+Board chạy pin (IP5306), nên kernel có ba chế độ, chọn trong Settings > Power hoặc bằng `power mode performance|balanced|battery` (lưu ở khoá `power.mode`). Mã nằm ở `kernel/src/power.rs`.
+
+| | performance | balanced (mặc định) | battery |
+|---|---|---|---|
+| Xung CPU | luôn 360 MHz | 180–360 MHz khi màn hình sáng, xuống 90 MHz khi tắt | 90–180 MHz khi màn hình sáng, xuống 40 MHz khi tắt |
+| Tick 1 kHz | luôn chạy | dừng khi cả hai core rảnh (tickless) | tickless |
+| Wi-Fi (ESP-Hosted `Req_WifiSetPs`) | không ngủ | modem sleep tối thiểu | modem sleep tối đa |
+| Clock gate khi `wfi` (`HP_SYS 0x118`) | tắt | tắt | bật |
+| Hỏi cảm ứng khi màn hình tắt | 50 ms | 100 ms | 200 ms |
+
+- **Tickless** (`kernel/src/time.rs`): tick k luôn nằm trên lưới `EPOCH + k·1 ms` của systimer (chạy từ XTAL, không đổi theo xung CPU). Khi cả hai core đang chạy thread idle, `time::stop` hẹn alarm tới lúc thread ngủ sớm nhất cần dậy (tối đa 1 s). Trong lúc đó `ticks()` đọc thẳng vị trí trên lưới. Tick chạy lại khi alarm đó tới, hoặc khi một core đổi thread (`sched::switch` gọi `time::resume`), và số tick đã trôi qua được cộng một lần cho thread ngủ, thời gian chạy và tải CPU. Scheduler chỉ thêm hai điểm nối: `when_all_idle` và `on_tick(now, elapsed)`.
+- **Đổi xung** (`kernel/src/clock.rs`): bốn mức theo `rtc_clk.c` của ESP-IDF: 360 (CPLL /1, MEM/SYS 180, APB 90), 180 (CPLL /2, MEM/SYS 180, APB 90), 90 (CPLL /4, mọi bus 90) và 40 MHz (XTAL, mọi bus 40). Systimer, I2C, I2S, LEDC (XTAL), SDMMC (PLL_F160M), xung pixel DSI (PLL_F240M) và PSRAM (MPLL) có nguồn riêng nên không phải lập trình lại. Thread `power` lấy mẫu thời gian `wfi` của từng core mỗi 100 ms (500 ms khi tắt màn hình): tải > 75 % thì lên mức nhanh nhất, < 40 % (tính theo mức chậm hơn) ba lần liền thì xuống một mức. Chạm màn hình và truyền mạng gọi `power::boost` để lên ngay mức nhanh nhất; âm thanh đang phát giữ ít nhất 180 MHz.
+- **Màn hình**: thread GUI giảm đèn nền còn 25 % sau `power.dim_s`, rồi sau `power.off_s` thì dừng DMA khung hình, chuyển DSI sang command mode, gửi `0x28` (display off) và `0x10` (sleep in) cho ST7701S. Một lần chạm đánh thức màn hình (`0x11`, `0x29`, chạy lại DMA) và **không** được chuyển cho app. Chạm giả lập `tap X Y` vẫn được chuyển. `bl N` và `fill` cũng bật lại màn hình. Mỗi lần màn hình tắt hoặc bật lại từ trạng thái tắt, thread GUI gọi `Desktop::on_screen_off` / `on_wake` để màn hình khoá xử lý.
+- Lệnh shell: `power` (trạng thái, kể cả điện áp pin), `power stat [S]` (đo trong S giây: % thời gian `wfi` và số lần thức dậy mỗi giây của từng core, số ngắt tick, tỉ lệ thời gian ở từng mức xung), `power freq auto|360|180|90|40` (ghim xung để thử), `power screen on|dim|off`, `power dim S`, `power off S`, `power gate auto|on|off`.
+- **Điện áp pin**: BAT+ qua cầu chia R52 68k / R57 100k vào GPIO53 (ADC2 kênh 4, suy giảm 12 dB), đổi sang mV bằng hiệu chuẩn eFuse như `adc_cali_curve_fitting` của ESP-IDF (`kernel/src/battery.rs`). Hiện ở thanh trạng thái và Settings > Power. Khi cắm USB, đây là điện áp sạc của IP5306 chứ không phải điện áp nghỉ của pin.
+
+Số đo trên board (không có đồng hồ đo dòng, nên dùng số liệu thay thế; Wi-Fi đã kết nối, màn hình chính):
+
+| Trạng thái | Xung | Core 0 thức dậy | Core 1 thức dậy | Ngắt tick |
+|---|---|---|---|---|
+| performance, màn hình sáng | 360 MHz | ~720/s | ~80/s | 1000/s |
+| balanced, màn hình sáng | 180/360 MHz | ~170/s | ~78/s | ~440/s |
+| balanced, màn hình tắt | 90 MHz | 32/s (99,3 % `wfi`) | 0 | 32/s |
+| battery, màn hình tắt | 40 MHz | 17/s (99,5 % `wfi`) | 0 | 17/s |
+
+Những điều đã kiểm chứng và giới hạn:
+
+- `wfi` vẫn đánh thức core khi ngắt đang bị che (`mstatus.MIE = 0`), nên quyết định dừng tick và `wfi` nằm trong cùng một đoạn che ngắt.
+- `mcycle` vẫn đếm đủ tốc độ trong `wfi`, kể cả khi đã xoá `CPU_WAIT_MODE_FORCE_ON`. Vì vậy không đo được clock gate có thật sự tắt xung lõi hay không; kernel dùng chính `mcycle` để tính thời gian `wfi`. ESP-IDF ghi chú rằng khi bật gate này, debugger JTAG không truy cập được bộ nhớ lúc core đang `wfi`, nên chỉ chế độ battery bật nó. Không có cách ngủ sâu hơn cho core 1 mà vẫn nhận IPI: tắt `CORE1_CPU_CLK_EN` hay stall qua PMU sẽ cần scheduler biết đưa core 1 offline.
+- Ở 90 MHz màn hình chạy 53 khung/s không underrun. Ở 40 MHz (bus 40 MHz) có underrun, nên khi màn hình sáng không bao giờ xuống 40 MHz. ESP-IDF giữ xung tối đa khi DSI chạy; ở đây balanced giữ ≥ 180 MHz (bus không đổi so với 360 MHz).
+- HTTPS (`get https://example.com`) và thẻ SD chạy ở mọi chế độ, kể cả 40 MHz với modem sleep tối đa (bắt tay TLS 846 ms so với 478 ms ở balanced).
+- DMA âm thanh không tạo ngắt EOF nào trên `main` lẫn bản này (`audio`: `eof 0`), nên chưa kiểm chứng được âm thanh theo từng chế độ. Khi nó chạy, thread âm thanh sẽ che ngắt EOF và tắt ampli sau 4 buffer im lặng.
+- `bench` ở chế độ performance so với `main` cùng ngày: thông lượng (memcpy, CRC32, integer) như nhau; chuyển ngữ cảnh, yield, mutex và độ trễ ngắt khi idle chậm hơn 1–2,5 %; độ trễ vào ngắt khi CPU bận chậm hơn khoảng 25 ns (4–6 %). Vòng idle ở chế độ này giữ nguyên `wfi` cũ. Trước khi tách riêng như vậy, đoạn đo thời gian sau `wfi` làm độ trễ ngắt khi idle tăng gấp đôi.
+- `uptime` qua 32 s tickless (màn hình tắt) lệch so với đồng hồ máy chủ trong phạm vi độ trễ serial (32 042 ms).
+- Còn tốn điện: I2C hỏi cảm ứng 100 kHz bằng vòng chờ bận mỗi 16 ms khi màn hình sáng; thread `net` hỏi ESP32-C6 qua SDIO mỗi 10–100 ms vì chưa dùng ngắt SDIO. IP5306 tự tắt nguồn khi tải dưới khoảng 45 mA trong 32 s; nếu board tắt khi màn hình tắt thì đó là nguyên nhân.
 
 ## App user (U-mode, cách ly bằng PMP)
 
@@ -116,16 +156,36 @@ App user là binary riêng, không link vào kernel. Kernel nạp app từ flash
 
 | Việc | Lệnh |
 |---|---|
-| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app` |
+| Build `userapps/` và đóng gói thành image | `scripts/build-userapps.sh` → `out/userapps/hello.p4app`, `crash.p4app`, `ticker.p4app` |
 | Ghi image vào slot N (0..13, địa chỉ 0x720000 + N×0x10000). Script tự giữ khoá board | `scripts/flash-app.sh 0 out/userapps/hello.p4app` |
 | Liệt kê các slot hợp lệ (tên, kích thước) | shell: `apps` |
 | Chạy app ở slot N với tham số tuỳ chọn. Shell chờ đến khi app kết thúc | shell: `run 0`, `run 1 3` |
 
 - Nếu app truy cập ngoài vùng của nó, kernel chỉ dừng app đó và in một dòng `*** app 'crash' (thread 7) killed: store access fault ...`. Kernel, màn hình và shell vẫn chạy bình thường. `run 1 N` (N = 0..6, 8, 9) thử từng kiểu vi phạm, xem bảng trong `userapps/crash/src/main.rs`.
 - App luôn chạy trên core 1. Bootloader ESP-IDF khoá PMP entry 0–2 của core 0 (CLIC, cache controller, ROM vẫn chạm được từ U-mode), còn core 1 không bị khoá entry nào. Lệnh `pmp` in trạng thái PMP của từng core.
-- Giới hạn phần cứng: trên core 1, truy cập U-mode vào vùng CPU subsystem (0x20000000.., gồm CLIC) bị chặn nhưng **không sinh exception**, core 1 treo đến khi reset. **Đừng chạy `run 1 7`** khi người khác đang dùng board.
+- Giới hạn phần cứng: trên core 1, truy cập U-mode vào vùng CPU subsystem (0x20000000.., gồm CLIC) bị chặn nhưng **không sinh exception**, core 1 treo. Supervisor thấy core 1 không nhận ngắt nữa, sau khoảng 3,5 s ghi crash report "core hang" (kèm thread `appN` đang chạy trên đó) rồi reset chip. **Đừng chạy `run 1 7`** khi người khác đang dùng board, vì board sẽ reset.
 - ABI syscall, định dạng image và cơ chế PMP: [plans/261028-1217-user-mode-apps/design.md](../plans/261028-1217-user-mode-apps/design.md).
 - Khi build trong git worktree, cargo gộp cả `.cargo/config.toml` của repo cha nên `-Tlink.x` bị lặp. Khi đó hãy build kernel với `RUSTFLAGS="-C link-arg=-Tlink.x"`.
+
+## Khôi phục khi lỗi (watchdog, crash report)
+
+Mọi lỗi nặng đều kết thúc bằng một báo cáo lưu lại qua reset, rồi chip tự reset và chạy lại bình thường. Không còn trường hợp treo im lặng. Code: `kernel/src/fault.rs`, `wdt.rs`, `stack_guard.rs`.
+
+- **Lỗi được bắt:** kernel panic, exception của CPU (ví dụ đọc địa chỉ 0), tràn stack, thread quan trọng (`gui` 15 s, `net` 20 s) ngừng báo sống, một core không nhận ngắt nữa (treo bus hoặc tắt ngắt quá 3 s, ví dụ `run 1 7`), và supervisor không được chạy trong 5 s.
+- **Đã thử trên board:** mỗi lệnh thử bên dưới đều cho ra báo cáo đúng loại rồi tự khởi động lại về trạng thái chạy bình thường (Wi-Fi tự nối lại). `crash irqoff both` cho thấy MWDT stage 1 reset chip, lần boot sau ghi `hardware reset: 0x07`.
+- **Watchdog phần cứng:** RWDT 15 s (reset hệ thống, thêm 5 s thì reset cả chip) bật ngay từ lúc boot. MWDT0 bật khi thread `supervisor` (ưu tiên 1, chạy mỗi 500 ms) khởi động: hết 5 s thì ngắt cả hai core để ghi báo cáo, thêm 2 s nữa thì reset hệ thống nếu không core nào nhận được ngắt. Super watchdog để tự feed vì timeout cố định khoảng 1 s, ngắn hơn những lúc supervisor phải chờ CPU hợp lệ (`smpdemo`). Xoá sector flash (~45 ms tắt ngắt) ngắn hơn mọi timeout. Lệnh shell chạy từ app Terminal chạy trong `wdt::busy` nên không bị tính là `gui` treo.
+- **Tràn stack:** dùng SP monitor của assist_debug (như `CONFIG_ESP_SYSTEM_HW_STACK_GUARD` của ESP-IDF), không dùng PMP. Mỗi lần đổi thread, scheduler nạp giới hạn dưới = đáy stack + 256 byte; trap entry tắt monitor (handler chạy trên stack ngắt) và trap exit bật lại, trừ khi quay về U-mode. Thread nào dùng stack cộng một trap frame (144 byte) lấn vào 256 byte đó thì bị báo tràn. Canary ở đáy stack vẫn được kiểm tra mỗi lần switch. Chi phí đo bằng `bench` so với `main`: vào ngắt chậm thêm khoảng 160 ns (phần lớn là lần đọc lại thanh ghi monitor trước khi đổi sang stack ngắt), mỗi lần chuyển ngữ cảnh hay yield thêm khoảng 240 ns.
+- **Giới hạn:** trong vòng lặp lỗi (lỗi xảy ra ngay lúc boot) chip sẽ reset liên tục; không có giới hạn số lần. Tràn stack khi đang tắt ngắt mà sp đã trở lại trước khi bật ngắt chỉ bị bắt nếu canary bị ghi đè. Stack ngắt và stack boot không có guard. Timeout RWDT tính theo RC_SLOW ~136 kHz.
+- **Báo cáo:** nguyên nhân, core, thread, pc/ra/sp/mcause/mtval, backtrace tìm bằng cách quét stack tìm địa chỉ trả về (kernel build không có frame pointer nên có thể lẫn địa chỉ cũ), và core kia đang chạy gì. Báo cáo nằm ở LP SRAM `0x5010E000` (có CRC) và được giữ qua reset hệ thống. Lần boot sau in nó ra, rồi lưu một dòng tóm tắt vào cài đặt flash (khoá `sys.last_crash`) để vẫn còn sau khi mất nguồn. Settings → About có dòng "Last crash". Nếu chip bị watchdog phần cứng reset mà không kịp ghi báo cáo, lần boot sau ghi lý do reset của ROM (ví dụ `0x07 MWDT system reset`).
+- Đổi địa chỉ trong backtrace ra tên hàm: `~/.espressif/tools/riscv32-esp-elf/*/riscv32-esp-elf/bin/riscv32-esp-elf-addr2line -f -i -p -e out/riscv32imafc-unknown-none-elf/release/p4os 0x4100....`
+
+| Lệnh shell | Việc |
+|---|---|
+| `crash` / `crash clear` | In báo cáo lần trước / xoá nó (LP SRAM và flash) |
+| `crash panic`, `crash null`, `crash stack` | Thử panic, đọc địa chỉ 0, tràn stack 4 KiB |
+| `crash hang [gui\|net]` | Thread đó ngừng báo sống; supervisor reset sau timeout |
+| `crash irqoff 0\|1\|both`, `crash starve` | Tắt ngắt trên core; hai thread ưu tiên 10 chiếm cả hai core (MWDT) |
+| `crash reboot` | Reset hệ thống, không ghi báo cáo |
 
 ## Khôi phục firmware gốc
 
@@ -185,7 +245,7 @@ esptool --chip esp32p4 --port /dev/ttyACM0 write-flash 0 ~/backups/esp32p4/flash
 | Cảm ứng GT911 (I2C 0x5D) | Driver và cách ánh xạ toạ độ đã có | Chưa kiểm chứng bằng chạm thật. |
 | Wi-Fi (ESP32-C6 qua ESP-Hosted v2, SDIO) | Chạy: kết nối WPA2, DHCP, DNS, SNTP, TCP, HTTP/1.0 (smoltcp) và HTTPS. App Browser tải được trang `http://` và `https://` trên board | Lúc nhận dạng thẻ phải giữ D3 (GPIO17) ở mức cao như GPIO thường. Host báo sẵn sàng bằng cách ghi `0x01` vào SCRATCH_7 (0x08C). Mỗi lần CMD53 phải đọc **đúng** số byte đang chờ, đọc dư sẽ làm C6 ngừng trả lời. Firmware slave v2.3.x cần gửi đủ `threshold` và `pmf_cfg` trong cấu hình STA, nếu thiếu C6 sẽ treo. Chưa có BLE. |
 
-Một bẫy với systimer: comparator chỉ kích hoạt khi bộ đếm **bằng** giá trị đích. Nếu deadline đã trôi qua lúc ngắt đang tắt, tick sẽ dừng vĩnh viễn. `time::arm_after` xử lý trường hợp này bằng cách bỏ qua các chu kỳ bị lỡ và cộng bù số tick.
+Một bẫy với systimer: comparator chỉ kích hoạt khi bộ đếm **bằng** giá trị đích. Nếu deadline đã trôi qua lúc ngắt đang tắt, tick sẽ dừng vĩnh viễn. `time::arm` xử lý trường hợp này bằng cách hẹn sang tick kế tiếp trên lưới; số tick bị lỡ được tính lại từ lưới khi ngắt chạy.
 
 ## HTTPS
 

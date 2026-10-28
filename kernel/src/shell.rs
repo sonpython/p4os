@@ -60,9 +60,11 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get smpdemo apps run pmp screenshot"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get dl play stop power smpdemo apps run pmp crash screenshot"
         ),
         "flash" => crate::flash::diagnose(),
+        c if c == "power" || c.starts_with("power ") => crate::power::command(&c["power".len()..]),
+        c if c == "crash" || c.starts_with("crash ") => crate::fault::command(&c[5..]),
         "apps" => crate::apploader::list(),
         "pmp" => pmp_survey(),
         c if c == "run" || c.starts_with("run ") => run_app(c[3..].trim()),
@@ -91,6 +93,12 @@ fn execute(cmd: &str, serial: bool) {
         "audio" => crate::audio::diagnose(),
         "c6" => crate::c6::probe(),
         c if c.starts_with("get ") => http_get(c[4..].trim()),
+        c if c.starts_with("dl ") => download(c[3..].trim()),
+        c if c.starts_with("play ") => play_file(c[5..].trim()),
+        "stop" => {
+            use p4os_sdk::Audio;
+            crate::audio::Speaker.stop();
+        }
         c if c.starts_with("tone") => {
             use p4os_sdk::Audio;
             let freq = c[4..].trim().parse().unwrap_or(1000);
@@ -115,7 +123,11 @@ fn execute(cmd: &str, serial: bool) {
             }
         }
         c if c.starts_with("bl ") => match c[3..].trim().parse::<u32>() {
-            Ok(pct) => crate::backlight::set(pct as f32 / 100.0),
+            Ok(pct) => {
+                // A lit, awake panel first; the GUI sets its own level on wake.
+                crate::power::wake_screen_blocking(1000);
+                crate::backlight::set(pct as f32 / 100.0)
+            }
             Err(_) => kprintln!("usage: bl 0..100"),
         },
         "vpg on" => crate::display::test_pattern(true),
@@ -506,6 +518,56 @@ fn http_get(url: &str) {
                 return;
             }
         }
+    }
+}
+
+/// `dl URL /sd/PATH`: fetch a URL and save the body to the SD card.
+fn download(args: &str) {
+    use p4os_sdk::FileSystem;
+    let Some((url, path)) = args.split_once(' ') else {
+        kprintln!("usage: dl URL /sd/PATH");
+        return;
+    };
+    let (url, path) = (url.trim(), path.trim());
+    let id = crate::net::fetch(url);
+    let start = crate::time::ticks();
+    loop {
+        match crate::net::poll_fetch(id) {
+            p4os_sdk::FetchState::Pending if crate::time::ticks().wrapping_sub(start) > 300_000 => {
+                kprintln!("download still pending after 300 s");
+                return;
+            }
+            p4os_sdk::FetchState::Pending => crate::sched::sleep_ms(100),
+            p4os_sdk::FetchState::Done { status, body, .. } if status == 200 => {
+                let fetched = crate::time::ticks() - start;
+                match crate::fs::SdFs.write(path, &body) {
+                    Ok(()) => kprintln!("saved {} bytes to {} (fetch {} ms, total {} ms)", body.len(), path, fetched, crate::time::ticks() - start),
+                    Err(e) => kprintln!("write {} failed: {:?}", path, e),
+                }
+                return;
+            }
+            p4os_sdk::FetchState::Done { status, .. } => {
+                kprintln!("HTTP {}: not saved", status);
+                return;
+            }
+            p4os_sdk::FetchState::Failed(e) => {
+                kprintln!("download failed: {}", e);
+                return;
+            }
+        }
+    }
+}
+
+/// `play /sd/PATH`: play an MP3 or WAV file through the speaker; `stop` ends it.
+fn play_file(path: &str) {
+    use p4os_sdk::{Audio, FileSystem};
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match crate::fs::SdFs.open(path).ok().and_then(|r| p4os_media::audio::open(name, r)) {
+        Some(src) => {
+            crate::audio::Speaker.play(src);
+            kprintln!("playing {}", path);
+        }
+        None => kprintln!("can't play {}", path),
     }
 }
 

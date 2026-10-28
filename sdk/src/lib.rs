@@ -212,6 +212,10 @@ pub struct SystemStats {
     pub psram_total: usize,
     pub threads: Vec<ThreadStat>,
     pub chip: String,
+    /// Battery voltage in millivolts, when the board can measure it.
+    pub battery_mv: Option<u32>,
+    /// One-line summary of the last crash, empty if none was recorded.
+    pub last_crash: String,
 }
 
 /// A decoded image in display pixel format.

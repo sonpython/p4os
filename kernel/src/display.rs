@@ -16,7 +16,7 @@ use crate::sched::{self, notify_bits};
 use crate::sync::Mutex;
 use crate::{gpio, irq, kprintln, mmio, psram, soc, systimer};
 use alloc::alloc::{alloc_zeroed, Layout};
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub const WIDTH: usize = 480;
 pub const HEIGHT: usize = 800;
@@ -112,6 +112,10 @@ static FRONT: AtomicUsize = AtomicUsize::new(0);
 static PENDING: AtomicUsize = AtomicUsize::new(0);
 static FRAMES: AtomicU32 = AtomicU32::new(0);
 static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
+/// Set to stop re-arming the frame DMA (panel going to sleep).
+static STOPPING: AtomicBool = AtomicBool::new(false);
+/// The panel sleeps and nothing is streamed to it.
+static ASLEEP: AtomicBool = AtomicBool::new(false);
 /// Thread blocked in `present`, notified when its buffer goes on screen.
 /// Written before `PENDING`, so the handler that takes `PENDING` sees it.
 static FLIP_WAITER: AtomicUsize = AtomicUsize::new(0);
@@ -348,6 +352,9 @@ fn on_frame_done() {
         sched::notify(FLIP_WAITER.load(Ordering::Relaxed), notify_bits::DISPLAY_FLIP);
     }
     FRAMES.fetch_add(1, Ordering::Relaxed);
+    if STOPPING.load(Ordering::Acquire) {
+        return;
+    }
     dma_start(FRONT.load(Ordering::Acquire));
 }
 
@@ -395,18 +402,69 @@ pub fn init() -> Option<(Framebuffer, Framebuffer)> {
     Some((Framebuffer { ptr: front }, Framebuffer { ptr: back }))
 }
 
+/// Turn the panel off: finish the frame in flight, stop the frame DMA and
+/// the video stream, then send the ST7701S display-off (0x28) and
+/// sleep-in (0x10) commands with the D-PHY clock lane in low power. The
+/// backlight is the caller's business. Run from the GUI thread, which is
+/// the only caller of `present`, so no flip is pending meanwhile.
+pub fn sleep() {
+    if ASLEEP.load(Ordering::Acquire) {
+        return;
+    }
+    STOPPING.store(true, Ordering::Release);
+    // The DMA stops at the end of the frame being sent (< 20 ms).
+    let end = systimer::now_ticks() + 100_000 * systimer::TICKS_PER_US;
+    while mmio::read(DMAC + 0x18) & 1 != 0 && systimer::now_ticks() < end {
+        crate::sched::sleep_ms(2);
+    }
+    mmio::clear_bits(BRG + 0x40, 1);
+    mmio::write(BRG + 0x44, 1);
+    mmio::write(HOST + 0x34, 1); // command mode
+    mmio::write(HOST + 0x94, 0); // clock lane: low power between packets
+    dcs_write(0x28, &[]);
+    dcs_write(0x10, &[]);
+    // Sleep-in needs 120 ms before a sleep-out may follow.
+    crate::sched::sleep_ms(120);
+    ASLEEP.store(true, Ordering::Release);
+}
+
+/// Undo `sleep`: wake the controller (sleep-out 0x11, display-on 0x29) and
+/// restart video mode and the frame DMA on the current front buffer.
+pub fn wake() {
+    if !ASLEEP.load(Ordering::Acquire) {
+        return;
+    }
+    dcs_write(0x11, &[]);
+    crate::sched::sleep_ms(120);
+    dcs_write(0x29, &[]);
+    crate::sched::sleep_ms(20);
+    STOPPING.store(false, Ordering::Release);
+    ASLEEP.store(false, Ordering::Release);
+    dma_start(FRONT.load(Ordering::Acquire));
+    mmio::write(HOST + 0x34, 0); // video mode
+    mmio::write(HOST + 0x94, 0x3);
+    mmio::set_bits(BRG + 0x40, 1);
+    mmio::write(BRG + 0x44, 1);
+}
+
 /// Make `fb` visible at the next frame boundary and block until it is.
 /// After this returns the previous front buffer is free to draw into.
+/// While the panel sleeps the buffer just becomes the front buffer.
 /// The frame keeps the `FRAME_*` flags of the one it replaces.
 pub fn present(fb: &Framebuffer) {
     present_with(fb, FRONT_INFO.load(Ordering::Acquire));
 }
 
 /// `present` with the frame's `FRAME_*` flags, recorded for readers of
-/// the front buffer (screenshots).
+/// the front buffer (screenshots), also while the panel sleeps.
 pub fn present_with(fb: &Framebuffer, info: u32) {
     psram::cache_writeback(fb.ptr as usize, FB_BYTES);
     let _gate = FLIP_GATE.lock();
+    if ASLEEP.load(Ordering::Acquire) {
+        FRONT_INFO.store(info, Ordering::Release);
+        FRONT.store(fb.ptr as usize, Ordering::Release);
+        return;
+    }
     PENDING_INFO.store(info, Ordering::Release);
     FLIP_WAITER.store(sched::my_id(), Ordering::Relaxed);
     PENDING.store(fb.ptr as usize, Ordering::Release);
@@ -435,7 +493,10 @@ pub fn diagnose() {
         "usb_wrap otg_conf {:#x}, gpio out {:#x}, enable {:#x}",
         mmio::read(0x5008_0000), mmio::read(soc::GPIO + 0x04), mmio::read(soc::GPIO + 0x20)
     );
-    kprintln!("frames {} underruns {}", FRAMES.load(Ordering::Relaxed), UNDERRUNS.load(Ordering::Relaxed));
+    kprintln!(
+        "frames {} underruns {} asleep {}",
+        FRAMES.load(Ordering::Relaxed), UNDERRUNS.load(Ordering::Relaxed), ASLEEP.load(Ordering::Relaxed)
+    );
     kprintln!(
         "host: pwr {:#x} mode {:#x} phy_status {:#x} int_st0 {:#x} int_st1 {:#x} cmd_status {:#x} lpclk {:#x}",
         mmio::read(HOST + 0x04), mmio::read(HOST + 0x34), mmio::read(HOST + 0xB0),

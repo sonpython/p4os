@@ -1,11 +1,14 @@
-//! Settings: display brightness, volume, Wi-Fi, date & time and system
-//! information, arranged as a section list with a content pane.
+//! Settings: display brightness, power policy and screen timeouts, volume,
+//! Wi-Fi, date & time and system information, arranged as a section list
+//! with a content pane.
 
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use crate::lock::security::SecurityPage;
-use p4os_sdk::config::{check_wifi, WIFI_SSID};
+use p4os_sdk::config::{
+    self as keys, check_wifi, PowerMode, DIM_CHOICES_S, OFF_CHOICES_S, POWER_DIM_S, POWER_MODE, POWER_OFF_S, WIFI_SSID,
+};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DateTime, Orientation, Point, Rect, System, Ui};
 
@@ -40,6 +43,7 @@ fn icon(c: &mut Canvas, r: Rect) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Display,
+    Power,
     Sound,
     Wifi,
     DateTime,
@@ -47,8 +51,9 @@ enum Section {
     About,
 }
 
-const SECTIONS: [(Section, &str); 6] = [
+const SECTIONS: [(Section, &str); 7] = [
     (Section::Display, "Display"),
+    (Section::Power, "Power"),
     (Section::Sound, "Sound"),
     (Section::Wifi, "Wi-Fi"),
     (Section::DateTime, "Date & time"),
@@ -175,6 +180,30 @@ struct Settings {
     security: SecurityPage,
 }
 
+/// Width of the label column in the screen timeout rows.
+const POWER_LABEL_W: i32 = 112;
+
+const MODE_LABELS: [(PowerMode, &str); 3] =
+    [(PowerMode::Performance, "Performance"), (PowerMode::Balanced, "Balanced"), (PowerMode::Battery, "Battery")];
+
+fn mode_note(m: PowerMode) -> &'static str {
+    match m {
+        PowerMode::Performance => "Full speed always, Wi-Fi never sleeps.",
+        PowerMode::Balanced => "Speeds up on demand, Wi-Fi modem sleep.",
+        PowerMode::Battery => "Lowest clocks, deepest Wi-Fi sleep.",
+    }
+}
+
+/// Saved power mode, or the default when unset or invalid.
+fn saved_mode(v: Option<String>) -> PowerMode {
+    v.and_then(|v| keys::parse_power_mode(&v)).unwrap_or_default()
+}
+
+/// Saved timeout in seconds, or `default` when unset or invalid.
+fn saved_timeout(v: Option<String>, default: u32) -> u32 {
+    v.and_then(|v| keys::parse_timeout(&v)).unwrap_or(default)
+}
+
 /// Validate the Wi-Fi form; returns the SSID to join.
 fn wifi_submission(ssid: &str, password: &str) -> Result<String, &'static str> {
     let ssid = ssid.trim();
@@ -242,6 +271,92 @@ impl Settings {
         }
         let note = Rect::new(rest.x, seg.bottom() + 2, rest.w, rest.bottom() - seg.bottom() - 2);
         ui.text(note, "Rotation is manual (no motion sensor).", &small, t.text_dim, Align::Left);
+    }
+
+    /// Row of buttons, the selected one highlighted; returns the tapped
+    /// one. Labels use the body font, or the small one if any is too wide.
+    fn segmented(ui: &mut Ui, r: Rect, labels: &[&str], selected: Option<usize>) -> Option<usize> {
+        let t = *ui.theme;
+        let (body, small) = (ui.fonts.body, ui.fonts.small);
+        let cell_w = r.grid_cell(labels.len() as i32, 1, 6, 0, 0).w;
+        let font = if labels.iter().all(|l| body.measure(l) <= cell_w - 8) { body } else { small };
+        let mut tapped = None;
+        for (i, label) in labels.iter().enumerate() {
+            let cell = r.grid_cell(labels.len() as i32, 1, 6, i as i32, 0);
+            let (held, clicked) = ui.interact(cell);
+            let (bg, fg) = if selected == Some(i) { (t.accent, t.accent_text) } else { (t.surface_alt, t.text) };
+            let bg = if held { bg.lighten(40) } else { bg };
+            ui.canvas.fill_round_rect(cell, t.radius, bg);
+            ui.text(cell, label, &font, fg, Align::Center);
+            if clicked && selected != Some(i) {
+                tapped = Some(i);
+            }
+        }
+        tapped
+    }
+
+    /// One labelled row of timeout choices bound to `key`.
+    fn timeout_row(ui: &mut Ui, r: Rect, label: &str, key: &str, choices: &[u32], sys: &mut dyn System, default: u32) {
+        let t = *ui.theme;
+        let current = saved_timeout(sys.config_get(key), default);
+        let (name, seg) = r.split_left(POWER_LABEL_W);
+        let body = ui.fonts.body;
+        ui.text(name, label, &body, t.text, Align::Left);
+        let labels: alloc::vec::Vec<String> = choices.iter().map(|&s| keys::timeout_label(s)).collect();
+        let refs: alloc::vec::Vec<&str> = labels.iter().map(String::as_str).collect();
+        let selected = choices.iter().position(|&s| s == current);
+        if let Some(i) = Self::segmented(ui, seg, &refs, selected) {
+            sys.config_set(key, &format!("{}", choices[i]));
+        }
+    }
+
+    /// Power mode, screen timeouts and (where there is room) the current
+    /// clock and battery voltage. Fits the landscape pane without the
+    /// extras, which portrait has space for.
+    fn power(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
+        let t = *ui.theme;
+        let r = Self::heading(ui, r, "Power");
+        let (body, small) = (ui.fonts.body, ui.fonts.small);
+
+        let mode = saved_mode(sys.config_get(POWER_MODE));
+        let roomy = r.h >= 520;
+        let p = Rect::new(r.x, r.y, r.w, if roomy { 136 } else { 110 });
+        ui.panel(p);
+        let inner = p.inset(16);
+        let (head, rest) = inner.split_top(30);
+        ui.text(head, "Power mode", &body, t.text, Align::Left);
+        let labels = MODE_LABELS.map(|(_, l)| l);
+        let selected = MODE_LABELS.iter().position(|(m, _)| *m == mode);
+        let seg = Rect::new(rest.x, rest.y, rest.w, 48);
+        if let Some(i) = Self::segmented(ui, seg, &labels, selected) {
+            sys.config_set(POWER_MODE, keys::power_mode_value(MODE_LABELS[i].0));
+        }
+        if roomy {
+            let note = Rect::new(rest.x, seg.bottom() + 4, rest.w, rest.bottom() - seg.bottom() - 4);
+            ui.text(note, mode_note(mode), &small, t.text_dim, Align::Left);
+        }
+
+        let screen = Rect::new(r.x, p.bottom() + 12, r.w, 16 + 48 + 10 + 48 + 16);
+        ui.panel(screen);
+        let inner = screen.inset(16);
+        let dim_r = Rect::new(inner.x, inner.y, inner.w, 48);
+        let off_r = Rect::new(inner.x, dim_r.bottom() + 10, inner.w, 48);
+        Self::timeout_row(ui, dim_r, "Dim after", POWER_DIM_S, &DIM_CHOICES_S, sys, keys::DEFAULT_DIM_S);
+        Self::timeout_row(ui, off_r, "Screen off", POWER_OFF_S, &OFF_CHOICES_S, sys, keys::DEFAULT_OFF_S);
+
+        let info = Rect::new(r.x, screen.bottom() + 12, r.w, 2 * 50);
+        if info.bottom() > r.bottom() {
+            return;
+        }
+        let s = sys.stats();
+        let rows = [
+            ("CPU clock", if s.cpu_mhz == 0 { DASH.to_string() } else { format!("{} MHz", s.cpu_mhz) }),
+            ("Battery", s.battery_mv.map_or(DASH.to_string(), |mv| format!("{:.2} V", mv as f32 / 1000.0))),
+        ];
+        ui.panel(info);
+        for (i, (k, v)) in rows.iter().enumerate() {
+            Self::row(ui, Rect::new(info.x, info.y + i as i32 * 50, info.w, 50), k, v);
+        }
     }
 
     fn sound(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
@@ -374,6 +489,7 @@ impl Settings {
         let chip = if s.chip.is_empty() { DASH.to_string() } else { s.chip.clone() };
         let mhz = if s.cpu_mhz == 0 { DASH.to_string() } else { format!("{} MHz", s.cpu_mhz) };
         let threads = if s.threads.is_empty() { DASH.to_string() } else { format!("{}", s.threads.len()) };
+        let last_crash = if s.last_crash.is_empty() { "None".to_string() } else { s.last_crash.clone() };
         let rows = [
             ("Operating system", OS_NAME.to_string()),
             ("Chip", chip),
@@ -383,6 +499,7 @@ impl Settings {
             ("Kernel threads", threads),
             ("Installed apps", format!("{}", crate::APPS.len())),
             ("Rotation", "Manual (no accelerometer)".to_string()),
+            ("Last crash", last_crash),
         ];
         let row_h = 50;
         let p = Rect::new(r.x, r.y, r.w, rows.len() as i32 * row_h);
@@ -415,6 +532,7 @@ impl Settings {
     fn content(&mut self, ui: &mut Ui, pane: Rect, sys: &mut dyn System) {
         match SECTIONS[self.section].0 {
             Section::Display => self.display(ui, pane, sys),
+            Section::Power => self.power(ui, pane, sys),
             Section::Sound => self.sound(ui, pane, sys),
             Section::Wifi => self.wifi(ui, pane, sys),
             Section::DateTime => self.date_time(ui, pane, sys),
@@ -500,7 +618,7 @@ impl App for Settings {
         }
         // Keep the clock and link status live.
         match SECTIONS[self.section].0 {
-            Section::DateTime | Section::Wifi => Some(1000),
+            Section::DateTime | Section::Wifi | Section::Power => Some(1000),
             _ => None,
         }
     }
@@ -585,6 +703,22 @@ mod tests {
         assert_eq!(wifi_submission("open-net", ""), Ok("open-net".to_string()));
         assert!(wifi_submission("", "password1").is_err());
         assert!(wifi_submission("home", "short").is_err());
+    }
+
+    #[test]
+    fn power_settings_fall_back_to_defaults() {
+        assert_eq!(saved_mode(None), PowerMode::Balanced);
+        assert_eq!(saved_mode(Some("battery".into())), PowerMode::Battery);
+        assert_eq!(saved_mode(Some("bogus".into())), PowerMode::Balanced);
+        assert_eq!(saved_timeout(None, 30), 30);
+        assert_eq!(saved_timeout(Some("0".into()), 30), 0);
+        assert_eq!(saved_timeout(Some("600".into()), 30), 600);
+        assert_eq!(saved_timeout(Some("99999".into()), 30), 30);
+        // Every mode has a button and a note.
+        for m in keys::POWER_MODES {
+            assert!(MODE_LABELS.iter().any(|(x, _)| *x == m));
+            assert!(!mode_note(m).is_empty());
+        }
     }
 
     #[test]

@@ -63,6 +63,11 @@ static VOLUME: AtomicU32 = AtomicU32::new(70);
 static RATE: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicBool = AtomicBool::new(false);
 static EOF_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Nothing to play: the ring holds only silence, the buffer interrupt is
+/// masked and the amplifier is off, so the idle CPU is not woken ~86 times
+/// a second. The DMA keeps looping so playback restarts without re-init.
+static QUIET: AtomicBool = AtomicBool::new(false);
+static QUIET_LOCK: Mutex<()> = Mutex::new(());
 
 fn ring_desc(i: usize) -> usize {
     (&raw mut RING as usize) + i * 12
@@ -249,7 +254,8 @@ pub fn init() {
     codec_init();
     gpio::output(PIN_PA, true);
     READY.store(true, Ordering::Release);
-    sched::spawn("audio", 4, 16 * 1024, audio_thread, 0);
+    // MP3 decoding needs more than 16 KiB of stack.
+    sched::spawn("audio", 4, 32 * 1024, audio_thread, 0);
     kprintln!("audio: I2S1 + ES8311 ready at {} Hz", rate);
 }
 
@@ -259,8 +265,35 @@ fn finished_descriptor() -> usize {
     (0..DESCRIPTORS).find(|&i| ring_desc(i) == addr).unwrap_or(0)
 }
 
+/// Whether audio is playing or paused (keeps the clock floor up).
+pub fn is_active() -> bool {
+    PLAYING.load(Ordering::Acquire)
+}
+
+/// Go quiet once every ring buffer has been refilled with silence.
+fn enter_quiet() {
+    let _g = QUIET_LOCK.lock();
+    if PLAYING.load(Ordering::Acquire) {
+        return;
+    }
+    mmio::clear_bits(AHB_DMA + 0x38, 1 << 1);
+    gpio::set(PIN_PA, false);
+    QUIET.store(true, Ordering::Release);
+}
+
+/// Leave the quiet state before new PCM is due.
+fn wake_up() {
+    let _g = QUIET_LOCK.lock();
+    if QUIET.swap(false, Ordering::AcqRel) {
+        gpio::set(PIN_PA, true);
+        mmio::write(AHB_DMA + 0x3C, 1 << 1);
+        mmio::set_bits(AHB_DMA + 0x38, 1 << 1);
+    }
+}
+
 fn audio_thread(_: usize) {
     let mut pcm = alloc::vec![0i16; FRAMES_PER_BUF * 2];
+    let mut silent = 0;
     AUDIO_THREAD.store(sched::my_id(), Ordering::Release);
     loop {
         // If the thread fell behind, one wake-up stands for several
@@ -296,6 +329,10 @@ fn audio_thread(_: usize) {
             mmio::write(base + f * 4, l | (r << 16));
         }
         POSITION.fetch_add((filled / 2) as u32, Ordering::Relaxed);
+        silent = if PLAYING.load(Ordering::Acquire) { 0 } else { silent + 1 };
+        if silent == DESCRIPTORS {
+            enter_quiet();
+        }
     }
 }
 
@@ -313,6 +350,7 @@ impl p4os_sdk::Audio for Speaker {
         POSITION.store(0, Ordering::Relaxed);
         PAUSED.store(false, Ordering::Relaxed);
         PLAYING.store(true, Ordering::Release);
+        wake_up();
     }
 
     fn pause(&mut self, paused: bool) {
@@ -384,8 +422,9 @@ impl AudioSource for Tone {
 /// Print the audio pipeline state for debugging.
 pub fn diagnose() {
     kprintln!(
-        "audio: eof {} position {} playing {} rate {} | dma conf0 {:#x} link {:#x} state {:#x} int_raw {:#x} | i2s tx_conf {:#x} state {:#x} | clk ctrl15 {:#x} 16 {:#x} 17 {:#x}",
+        "audio: eof {} position {} playing {} quiet {} rate {} | dma conf0 {:#x} link {:#x} state {:#x} int_raw {:#x} | i2s tx_conf {:#x} state {:#x} | clk ctrl15 {:#x} 16 {:#x} 17 {:#x}",
         EOF_COUNT.load(Ordering::Relaxed), POSITION.load(Ordering::Relaxed), PLAYING.load(Ordering::Relaxed),
+        QUIET.load(Ordering::Relaxed),
         RATE.load(Ordering::Relaxed), mmio::read(AHB_DMA + 0xD0), mmio::read(AHB_DMA + 0xE0), mmio::read(AHB_DMA + 0xE4),
         mmio::read(AHB_DMA + 0x30), mmio::read(I2S1 + 0x24), mmio::read(I2S1 + 0x74),
         mmio::read(CLK + 0x54), mmio::read(CLK + 0x58), mmio::read(CLK + 0x5C)

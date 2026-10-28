@@ -154,10 +154,13 @@ impl Desktop {
         };
         let used = (stats.heap_used + stats.psram_used) / 1024;
         let total = (stats.heap_total + stats.psram_total) / 1024;
+        let battery = stats.battery_mv.map(|mv| format!("{}.{:02}V", mv / 1000, mv % 1000 / 10));
         let right = if r.w >= 800 {
-            format!("CPU {:>3.0}%   RAM {}K/{}K   {}", stats.cpu_load * 100.0, used, total, sys.net().status())
+            let battery = battery.map(|b| format!("   {b}")).unwrap_or_default();
+            format!("CPU {:>3.0}%   RAM {}K/{}K   {}{}", stats.cpu_load * 100.0, used, total, sys.net().status(), battery)
         } else {
-            format!("CPU {:.0}%  RAM {}M", stats.cpu_load * 100.0, used / 1024)
+            let battery = battery.map(|b| format!("  {b}")).unwrap_or_default();
+            format!("CPU {:.0}%  RAM {}M{}", stats.cpu_load * 100.0, used / 1024, battery)
         };
         let orientation = sys.orientation();
         let lockable = lock::is_configured(sys);
