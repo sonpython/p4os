@@ -142,6 +142,9 @@ pub struct AppUsage {
     pub psram: usize,
     /// Short status such as "audio" or "throttled"; may be empty.
     pub note: String,
+    /// How long the app's last on-screen frame took to draw (its own
+    /// drawing only, without compositing and display), 0 if none yet.
+    pub frame_us: u32,
 }
 
 /// Static description of an installed app, used by the launcher.
@@ -230,15 +233,72 @@ pub enum FetchState {
     Failed(String),
 }
 
+/// An HTTP request with a method, extra headers and a body, for APIs that
+/// need more than a plain GET (OAuth token exchanges, bearer tokens).
+///
+/// The OS adds Host, User-Agent, Accept-Encoding, Connection and
+/// Content-Length itself; requests repeating them, or with control
+/// characters in a header, fail. Bodies are limited to 2 KiB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub fn get(url: &str) -> Self {
+        Self { method: "GET".into(), url: url.into(), headers: Vec::new(), body: Vec::new() }
+    }
+
+    /// A POST of an `application/x-www-form-urlencoded` body.
+    pub fn post_form(url: &str, body: &str) -> Self {
+        Self {
+            method: "POST".into(),
+            url: url.into(),
+            headers: alloc::vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Plain GETs are all [`Network::fetch`] can do.
+    pub fn is_plain_get(&self) -> bool {
+        self.method == "GET" && self.headers.is_empty() && self.body.is_empty()
+    }
+}
+
 pub trait Network {
     /// Human-readable link state, e.g. "Ethernet 192.168.1.20".
     fn status(&self) -> String;
     fn is_up(&self) -> bool;
     /// Start an HTTP GET in the background.
     fn fetch(&mut self, url: &str) -> FetchId;
+    /// Start any HTTP request in the background; poll it like a fetch.
+    /// Redirects to another origin drop the Authorization header.
+    ///
+    /// The default supports plain GETs only; anything else is sent to an
+    /// invalid URL so that it fails instead of silently losing its method,
+    /// headers or body.
+    fn send(&mut self, req: HttpRequest) -> FetchId {
+        if req.is_plain_get() {
+            self.fetch(&req.url)
+        } else {
+            self.fetch("unsupported:request-with-method-headers-or-body")
+        }
+    }
     /// Current state of a fetch. Once `Done` or `Failed` has been
     /// returned the implementation may forget the id.
     fn poll(&mut self, id: FetchId) -> FetchState;
+    /// Abandon a request (the app is closing or no longer needs it): the
+    /// OS stops it and frees its result. Polling the id afterwards reports
+    /// an unknown request. The default does nothing.
+    fn cancel(&mut self, _id: FetchId) {}
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +406,11 @@ pub trait System {
     }
     /// Store a persistent setting; it survives reboots.
     fn config_set(&mut self, _key: &str, _value: &str) {}
+    /// Delete a persistent setting. The default stores an empty value,
+    /// which readers of optional settings treat as unset.
+    fn config_remove(&mut self, key: &str) {
+        self.config_set(key, "");
+    }
     /// Microseconds since boot, for measuring short durations.
     fn uptime_us(&self) -> u64 {
         self.uptime_ms() * 1000

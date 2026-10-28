@@ -13,7 +13,7 @@ use crate::{irq, kprintln, mmio, sched, soc, systimer};
 use alloc::alloc::{alloc, dealloc};
 use core::alloc::Layout;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 const RUNS: usize = 5;
 /// Above every system thread, so only interrupts compete with the bench.
@@ -45,7 +45,13 @@ const SEED: u32 = 0x1234_5678;
 
 /// Systimer comparator 1 (comparator 0 drives the kernel tick).
 const ALARM_LINE: usize = 20;
+/// Kernel level, as in the FreeRTOS bench (its handler may use semaphores).
 const ALARM_LEVEL: u32 = 3;
+/// Level of the fast-interrupt rows, the display page-flip level: not masked
+/// by kernel critical sections, wakes threads only through `sched::notify`.
+const FAST_LEVEL: u32 = 6;
+const _: () = assert!(ALARM_LEVEL <= irq::KERNEL_LEVEL && FAST_LEVEL > irq::KERNEL_LEVEL);
+const CRIT_OPS: u32 = 100_000;
 const ST_CONF: usize = soc::SYSTIMER;
 const ST_TARGET1_HI: usize = soc::SYSTIMER + 0x24;
 const ST_TARGET1_LO: usize = soc::SYSTIMER + 0x28;
@@ -69,7 +75,12 @@ static ISR_TICKS: AtomicU32 = AtomicU32::new(0);
 static SPIN_CYCLES: AtomicU32 = AtomicU32::new(0);
 static ENTRY_CYCLES: AtomicU32 = AtomicU32::new(0);
 static FIRED: AtomicU32 = AtomicU32::new(0);
-static WAKE_THREAD: AtomicU32 = AtomicU32::new(0);
+/// How the alarm handler wakes the bench thread.
+static WAKE: AtomicU32 = AtomicU32::new(WAKE_NONE);
+const WAKE_NONE: u32 = 0;
+const WAKE_SEMAPHORE: u32 = 1;
+const WAKE_NOTIFY: u32 = 2;
+static BENCH_THREAD: AtomicUsize = AtomicUsize::new(0);
 
 #[inline(always)]
 fn cycles() -> u32 {
@@ -106,14 +117,21 @@ fn runner(_: usize) {
     row("ctx switch (sem ping-pong)", "ns", repeat(pingpong));
     row("yield (2 equal-prio threads)", "ns", repeat(yield_pair));
     row("mutex lock+unlock (uncontended)", "ns", repeat(mutex_pair));
+    row("critical section, mstatus.MIE (in+out)", "ns", repeat(crit_mie));
+    row("critical section, CLIC threshold (in+out)", "ns", repeat(crit_threshold));
 
-    alarm_init();
+    BENCH_THREAD.store(sched::my_id(), Ordering::Relaxed);
+    alarm_init(ALARM_LEVEL);
     let mut idle = [[0f32; 4]; RUNS];
+    let mut ntf = [[0f32; 4]; RUNS];
     let mut busy = [[0f32; 2]; RUNS];
     for r in 0..RUNS {
-        idle[r] = irq_wake_run();
+        idle[r] = irq_wake_run(WAKE_SEMAPHORE);
+        ntf[r] = irq_wake_run(WAKE_NOTIFY);
         busy[r] = irq_busy_run();
     }
+    alarm_init(FAST_LEVEL);
+    let fast: [[f32; 4]; RUNS] = core::array::from_fn(|_| irq_wake_run(WAKE_NOTIFY));
     alarm_stop();
     row("irq latency avg (thread blocked)", "ns", column(&idle, 0));
     row("irq latency max (thread blocked)", "ns", column(&idle, 1));
@@ -121,6 +139,12 @@ fn runner(_: usize) {
     row("irq entry avg (cpu busy, mcycle)", "ns", column(&busy, 1));
     row("isr->thread wake avg (semaphore)", "ns", column(&idle, 2));
     row("isr->thread wake max (semaphore)", "ns", column(&idle, 3));
+    row("isr->thread wake avg (task notify)", "ns", column(&ntf, 2));
+    row("isr->thread wake max (task notify)", "ns", column(&ntf, 3));
+    row("fast irq latency avg (level 6, blocked)", "ns", column(&fast, 0));
+    row("fast irq latency max (level 6, blocked)", "ns", column(&fast, 1));
+    row("fast isr->thread wake avg (notify)", "ns", column(&fast, 2));
+    row("fast isr->thread wake max (notify)", "ns", column(&fast, 3));
 
     heap_row("heap alloc+free 32 B (sram)", 32, false);
     heap_row("heap alloc+free 1 KiB (sram)", 1024, false);
@@ -202,14 +226,36 @@ fn mutex_pair() -> f32 {
 
 // --- interrupt latency ---------------------------------------------------
 
-fn alarm_init() {
+/// Enter and leave a critical section that masks every interrupt.
+fn crit_mie() -> f32 {
+    let t0 = cycles();
+    for _ in 0..CRIT_OPS {
+        irq::free(|| black_box(()));
+    }
+    cycles_to_ns(cycles().wrapping_sub(t0)) / CRIT_OPS as f32
+}
+
+/// Enter and leave a kernel critical section (CLIC threshold raise), the
+/// masking part of every `SpinLock` lock/unlock.
+fn crit_threshold() -> f32 {
+    let t0 = cycles();
+    for _ in 0..CRIT_OPS {
+        let mask = irq::mask_kernel();
+        irq::unmask_kernel(black_box(mask));
+    }
+    cycles_to_ns(cycles().wrapping_sub(t0)) / CRIT_OPS as f32
+}
+
+/// Enable comparator 1 and route it to this core at `level` (calling it
+/// again just changes the level).
+fn alarm_init(level: u32) {
     irq::free(|| {
         mmio::write(ST_TARGET1_CONF, 0); // one-shot, compares with unit 0
         mmio::set_bits(ST_CONF, ST_TARGET1_WORK_EN);
         mmio::write(ST_INT_CLR, ST_TARGET1_INT);
         mmio::set_bits(ST_INT_ENA, ST_TARGET1_INT);
     });
-    irq::attach(soc::source::SYSTIMER_TARGET1, ALARM_LINE, ALARM_LEVEL, on_alarm);
+    irq::attach(soc::source::SYSTIMER_TARGET1, ALARM_LINE, level, on_alarm);
 }
 
 fn alarm_stop() {
@@ -221,12 +267,19 @@ fn alarm_stop() {
 }
 
 /// Arm comparator 1 `IRQ_LEAD_TICKS` ahead and return the deadline.
+///
+/// The comparator fires only when the counter equals the target, so a
+/// target already in the past never fires and the run would wait forever.
+/// Masking interrupts keeps handlers (or the other core parking this one
+/// for a flash write) from delaying the arm past the lead time.
 fn alarm_arm() -> u32 {
-    let deadline = systimer::now_ticks() + IRQ_LEAD_TICKS;
-    mmio::write(ST_TARGET1_HI, (deadline >> 32) as u32 & 0xF_FFFF);
-    mmio::write(ST_TARGET1_LO, deadline as u32);
-    mmio::write(ST_COMP1_LOAD, 1);
-    deadline as u32
+    irq::free(|| {
+        let deadline = systimer::now_ticks() + IRQ_LEAD_TICKS;
+        mmio::write(ST_TARGET1_HI, (deadline >> 32) as u32 & 0xF_FFFF);
+        mmio::write(ST_TARGET1_LO, deadline as u32);
+        mmio::write(ST_COMP1_LOAD, 1);
+        deadline as u32
+    })
 }
 
 fn on_alarm() {
@@ -237,20 +290,28 @@ fn on_alarm() {
     ISR_CYCLES.store(c, Ordering::Relaxed);
     ISR_TICKS.store(t, Ordering::Relaxed);
     FIRED.store(1, Ordering::Release);
-    if WAKE_THREAD.load(Ordering::Relaxed) != 0 {
-        ISR_SEM.release();
+    match WAKE.load(Ordering::Relaxed) {
+        WAKE_SEMAPHORE => ISR_SEM.release(),
+        WAKE_NOTIFY => sched::notify(BENCH_THREAD.load(Ordering::Relaxed), sched::notify_bits::BENCH),
+        _ => {}
     }
 }
 
-/// The bench thread blocks on a semaphore the alarm handler releases.
+/// The bench thread blocks on a semaphore the alarm handler releases, or
+/// waits for a notification it posts (`how`).
 /// Returns [avg irq latency, max irq latency, avg wake, max wake] in ns.
-fn irq_wake_run() -> [f32; 4] {
-    WAKE_THREAD.store(1, Ordering::Relaxed);
+fn irq_wake_run(how: u32) -> [f32; 4] {
+    WAKE.store(how, Ordering::Relaxed);
     let (mut lat_sum, mut lat_max, mut wake_sum, mut wake_max) = (0u64, 0u32, 0u64, 0u32);
     for _ in 0..IRQ_SAMPLES {
         let deadline = alarm_arm();
-        ISR_SEM.acquire();
+        if how == WAKE_SEMAPHORE {
+            ISR_SEM.acquire();
+        } else {
+            sched::wait_notify(sched::notify_bits::BENCH);
+        }
         let woke = cycles();
+
         let lat = ISR_TICKS.load(Ordering::Relaxed).wrapping_sub(deadline);
         let wake = woke.wrapping_sub(ISR_CYCLES.load(Ordering::Relaxed));
         lat_sum += lat as u64;
@@ -258,7 +319,7 @@ fn irq_wake_run() -> [f32; 4] {
         wake_sum += wake as u64;
         wake_max = wake_max.max(wake);
     }
-    WAKE_THREAD.store(0, Ordering::Relaxed);
+    WAKE.store(WAKE_NONE, Ordering::Relaxed);
     let n = IRQ_SAMPLES as f32;
     [
         ticks_to_ns(lat_sum as u32) / n,

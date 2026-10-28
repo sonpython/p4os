@@ -22,7 +22,7 @@ Status: working on real hardware, under active development. Built as a learning 
 | Audio | I2S + ES8311 codec + DMA ring (verified electrically; no speaker fitted) |
 | Network | ESP32-C6 over SDIO running ESP-Hosted v2: Wi-Fi STA, DHCP, DNS, SNTP, TCP and HTTP/1.0 via smoltcp; HTTPS with TLS 1.3/1.2 (rustls + RustCrypto, certificates verified against the Mozilla roots) |
 | GUI | Immediate-mode toolkit with anti-aliased fonts (Vietnamese included), on-screen keyboard, portrait/landscape, lock screen with a PBKDF2-hashed passcode and attempt limiting, edge gestures (Home, app switcher, Back/Forward), paged home screen |
-| Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor (with a task manager), Settings, Clock, Paint, 2048; apps keep running in the background with per-app heap/CPU accounting and limits |
+| Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor (with a task manager), Settings, Clock, Paint, 2048, YouTube (Data API browsing and Google sign-in; no on-device playback yet); apps keep running in the background with per-app heap/CPU accounting and limits |
 
 Not yet: loading user apps from SD, BLE, PPA graphics acceleration.
 

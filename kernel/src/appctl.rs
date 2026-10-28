@@ -165,6 +165,7 @@ pub fn user_apps() -> Vec<AppUsage> {
                 sram,
                 psram,
                 note: String::from(if e.budget.throttled() { "throttled" } else { "" }),
+                frame_us: 0,
             }
         })
         .collect()

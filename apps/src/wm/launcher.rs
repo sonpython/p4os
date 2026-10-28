@@ -143,14 +143,15 @@ mod tests {
     #[test]
     fn builtin_apps_fill_pages_in_order() {
         let c = Catalogue::builtin();
-        let one = c.pages(12);
+        let one = c.pages(APPS.len());
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].apps.len(), APPS.len());
-        let two = c.pages(10);
+        let per = APPS.len() - 2;
+        let two = c.pages(per);
         assert_eq!(two.len(), 2);
-        assert_eq!(two[1].apps.len(), APPS.len() - 10);
-        assert_eq!(two[1].apps[0].id, APPS[10].id);
-        assert_eq!(locate(&two, APPS[11].id), Some((1, 1)));
+        assert_eq!(two[1].apps.len(), 2);
+        assert_eq!(two[1].apps[0].id, APPS[per].id);
+        assert_eq!(locate(&two, APPS[per + 1].id), Some((1, 1)));
     }
 
     #[test]
@@ -160,7 +161,7 @@ mod tests {
         c.register("Examples", &DEMO_A);
         c.register("Examples", &DEMO_B);
         assert!(c.version > v);
-        let pages = c.pages(12);
+        let pages = c.pages(APPS.len());
         assert_eq!(pages.len(), 2);
         assert_eq!(pages[0].group, MAIN);
         assert_eq!(pages[1].group, "Examples");
@@ -168,7 +169,7 @@ mod tests {
         assert_eq!(c.find("demo-b").map(|a| a.name), Some("Demo B"));
         // Registering again moves rather than duplicates.
         c.register("Examples", &DEMO_A);
-        assert_eq!(c.pages(12)[1].apps.len(), 2);
+        assert_eq!(c.pages(APPS.len())[1].apps.len(), 2);
     }
 
     #[test]

@@ -42,7 +42,7 @@ const SNTP_RESYNC_MS: u32 = 6 * 3600 * 1000;
 static STARTED: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static IP: Mutex<Option<Ipv4Address>> = Mutex::new(None);
-static REQUESTS: Mutex<VecDeque<(FetchId, String)>> = Mutex::new(VecDeque::new());
+static REQUESTS: Mutex<VecDeque<(FetchId, String, http::Request)>> = Mutex::new(VecDeque::new());
 static RESULTS: Mutex<BTreeMap<FetchId, FetchState>> = Mutex::new(BTreeMap::new());
 
 struct WifiDevice;
@@ -116,10 +116,22 @@ pub fn ip() -> Option<Ipv4Address> {
 }
 
 pub fn fetch(url: &str) -> FetchId {
+    send(url, http::Request::get())
+}
+
+/// Queue a request with any method, headers and body.
+pub fn send(url: &str, request: http::Request) -> FetchId {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     RESULTS.lock().insert(id, FetchState::Pending);
-    REQUESTS.lock().push_back((id, url.to_string()));
+    REQUESTS.lock().push_back((id, url.to_string(), request));
     id
+}
+
+/// Abandon a request: a queued one is never sent, a running one has its
+/// connection closed, and no result is kept for it.
+pub fn cancel(id: FetchId) {
+    RESULTS.lock().remove(&id);
+    REQUESTS.lock().retain(|(r, _, _)| *r != id);
 }
 
 /// State of a fetch. A finished result is handed out once and then
@@ -169,6 +181,7 @@ impl Stage {
 struct Job {
     id: FetchId,
     target: Url,
+    request: http::Request,
     redirects: u32,
     stage: Stage,
     started: u32,
@@ -240,8 +253,8 @@ fn run(mac_lo: usize) {
             // the first page after boot does not fail certificate checks.
             let hold_https = rtc::unix_now().is_none() && elapsed_ms(configured_at) < CLOCK_WAIT_MS;
             loop {
-                let Some((id, url)) = REQUESTS.lock().pop_front() else { break };
-                let target = match Url::parse(&url) {
+                let Some((id, url, request)) = REQUESTS.lock().pop_front() else { break };
+                let target = match request.validate().and_then(|()| Url::parse(&url)) {
                     Ok(t) => t,
                     Err(e) => {
                         finish(id, FetchState::Failed(e));
@@ -249,22 +262,37 @@ fn run(mac_lo: usize) {
                     }
                 };
                 if target.https && hold_https {
-                    REQUESTS.lock().push_front((id, url));
+                    REQUESTS.lock().push_front((id, url, request));
                     break;
                 }
                 match net.resolve(&target) {
-                    Ok(stage) => jobs.push(Job { id, target, redirects: 0, stage, started: time::ticks(), tls_started: 0 }),
+                    Ok(stage) => {
+                        jobs.push(Job { id, target, request, redirects: 0, stage, started: time::ticks(), tls_started: 0 })
+                    }
                     Err(e) => finish(id, FetchState::Failed(e)),
                 }
             }
         }
+        // Drop cancelled jobs (their result slot is gone) and close their sockets.
+        jobs.retain(|job| {
+            let live = RESULTS.lock().contains_key(&job.id);
+            if !live {
+                if let Some(h) = job.stage.socket() {
+                    net.sockets.remove(h);
+                }
+            }
+            live
+        });
         jobs.retain_mut(|job| net.advance(job));
         sched::sleep_ms(if jobs.is_empty() { 10 } else { 2 });
     }
 }
 
+/// Store the outcome of a request, unless it was cancelled meanwhile.
 fn finish(id: FetchId, state: FetchState) {
-    RESULTS.lock().insert(id, state);
+    if let Some(slot) = RESULTS.lock().get_mut(&id) {
+        *slot = state;
+    }
 }
 
 /// What one step of a job produced.
@@ -340,6 +368,7 @@ impl Net {
             let next = job.target.resolve(response.location.as_deref().unwrap_or("/"));
             match Url::parse(&next).and_then(|t| Ok((self.resolve(&t)?, t))) {
                 Ok((stage, target)) => {
+                    job.request.follow_redirect(response.status, &job.target, &target);
                     job.target = target;
                     job.stage = stage;
                     job.redirects += 1;
@@ -379,13 +408,13 @@ impl Net {
                 let sock = self.sockets.get_mut::<tcp::Socket>(h);
                 if sock.may_send() {
                     if !job.target.https {
-                        let _ = sock.send_slice(&job.target.request());
+                        let _ = sock.send_slice(&job.request.encode(&job.target));
                         job.stage = Stage::Plain(h, Vec::new());
                         return Step::Continue;
                     }
                     let client = self
                         .tls_config()
-                        .and_then(|cfg| TlsClient::new(cfg, &job.target.host, job.target.request()));
+                        .and_then(|cfg| TlsClient::new(cfg, &job.target.host, job.request.encode(&job.target)));
                     match client {
                         Ok(c) => {
                             job.tls_started = time::ticks();
@@ -577,7 +606,15 @@ impl p4os_sdk::Network for WifiNet {
         fetch(url)
     }
 
+    fn send(&mut self, req: p4os_sdk::HttpRequest) -> FetchId {
+        send(&req.url, http::Request { method: req.method, headers: req.headers, body: req.body })
+    }
+
     fn poll(&mut self, id: FetchId) -> FetchState {
         poll_fetch(id)
+    }
+
+    fn cancel(&mut self, id: FetchId) {
+        cancel(id)
     }
 }

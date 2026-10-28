@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "UCp4osChannelAAAAAAAAAAA",
+      "contentDetails": {
+        "relatedPlaylists": {
+          "uploads": "UUp4osChannelAAAAAAAAAAA"
+        }
+      }
+    },
+    {
+      "id": "UCp4osChannelCCCCCCCCCCC",
+      "contentDetails": {
+        "relatedPlaylists": {
+          "uploads": "UUp4osChannelCCCCCCCCCCC"
+        }
+      }
+    },
+    {
+      "id": "UCp4osChannelGGGGGGGGGGG",
+      "contentDetails": {
+        "relatedPlaylists": {
+          "uploads": "UUp4osChannelGGGGGGGGGGG"
+        }
+      }
+    }
+  ]
+}

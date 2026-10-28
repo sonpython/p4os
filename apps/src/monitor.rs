@@ -101,7 +101,11 @@ fn state_text(a: &AppUsage) -> String {
         AppState::Stopped => "Stopped",
     };
     let kind = if matches!(a.handle, p4os_sdk::AppHandle::User(_)) { ", isolated" } else { "" };
-    if a.note.is_empty() { format!("{state}{kind}") } else { format!("{state}{kind} ({})", a.note) }
+    let mut s = if a.note.is_empty() { format!("{state}{kind}") } else { format!("{state}{kind} ({})", a.note) };
+    if a.frame_us > 0 {
+        s.push_str(&format!(", frame {:.1} ms", a.frame_us as f32 / 1000.0));
+    }
+    s
 }
 
 fn fmt_cpu(permille: u16) -> String {
@@ -537,6 +541,7 @@ mod tests {
             sram: 0,
             psram: 0,
             note: "audio".into(),
+            frame_us: 0,
         };
         assert_eq!(state_text(&a), "Background (audio)");
         assert_eq!(fmt_cpu(a.cpu_permille), "2.5%");
@@ -544,6 +549,9 @@ mod tests {
         a.note.clear();
         a.state = AppState::Foreground;
         assert_eq!(state_text(&a), "Foreground, isolated");
+        a.handle = p4os_sdk::AppHandle::Builtin(2);
+        a.frame_us = 12_345;
+        assert_eq!(state_text(&a), "Foreground, frame 12.3 ms");
     }
 
     #[test]

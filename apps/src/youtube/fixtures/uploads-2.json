@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "snippet": {
+        "publishedAt": "2026-10-28T09:30:00Z",
+        "title": "Part 4: our breadboard CPU runs its first program",
+        "videoOwnerChannelTitle": "Silicon Tinkerer",
+        "videoOwnerChannelId": "UCp4osChannelCCCCCCCCCCC"
+      },
+      "contentDetails": {
+        "videoId": "p4Os_Feed04",
+        "videoPublishedAt": "2026-10-28T09:30:00Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-10-10T16:00:00Z",
+        "title": "Q&A: why I left FreeRTOS",
+        "videoOwnerChannelTitle": "Silicon Tinkerer",
+        "videoOwnerChannelId": "UCp4osChannelCCCCCCCCCCC"
+      },
+      "contentDetails": {
+        "videoId": "p4Os_Feed05",
+        "videoPublishedAt": "2026-10-10T16:00:00Z"
+      }
+    }
+  ]
+}

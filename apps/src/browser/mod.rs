@@ -869,6 +869,14 @@ impl App for Browser {
         self.poll(sys);
     }
 
+    fn on_stop(&mut self, sys: &mut dyn System) {
+        // Closed, not just backgrounded: free the page being loaded instead
+        // of leaving it in the OS.
+        if let Some((id, _)) = self.loading.take() {
+            sys.net().cancel(id);
+        }
+    }
+
     /// The laid-out page is rebuilt from the source on the next draw.
     fn on_low_memory(&mut self, _sys: &mut dyn System) {
         if let View::Doc(d) = &mut self.view {

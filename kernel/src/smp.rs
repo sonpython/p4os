@@ -40,6 +40,8 @@ const CLIC_INT_CONFIG: usize = soc::CLIC;
 /// Highest CLIC line, kept clear of the driver lines allocated from 16 up.
 const IPI_LINE: usize = 47;
 const IPI_LEVEL: u32 = 1;
+// The handler takes the scheduler lock.
+const _: () = assert!(IPI_LEVEL <= irq::KERNEL_LEVEL);
 
 /// Core 0 settings core 1 copies so both cores behave the same: the custom
 /// MHCR CSR (branch prediction and related features) and the CLIC config.
@@ -78,15 +80,18 @@ pub fn init_ipi() {
     irq::attach(soc::source::FROM_CPU0 + hart, IPI_LINE, IPI_LEVEL, on_ipi);
 }
 
-/// The sender sets the target's reschedule (or park) flag before raising
-/// the line; clearing the line before reading the flags means a request
-/// arriving in between is either seen now or raises the line again.
+/// The sender sets the target's reschedule (or park, or deferred wake-up)
+/// flag before raising the line; clearing the line before reading the
+/// flags means a request arriving in between is either seen now or raises
+/// the line again. The IPI is a kernel-level interrupt, so a core also
+/// sends one to itself to run scheduler work a fast handler could not.
 fn on_ipi() {
     mmio::write(CPU_INT_FROM_CPU + irq::hart_id() * 4, 0);
     unsafe { asm!("fence iorw, iorw") };
     if PARK_REQUEST.load(Ordering::Acquire) != 0 {
         park();
     }
+    sched::wake_deferred();
 }
 
 /// Non-zero while a core wants the other one parked: the request number.

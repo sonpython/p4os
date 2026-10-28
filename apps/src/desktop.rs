@@ -63,6 +63,8 @@ struct Running {
     /// Heap attributed to the app at the last check (SRAM, PSRAM).
     heap: (usize, usize),
     granted: Capabilities,
+    /// Duration of the app's last foreground `update`.
+    frame_us: u32,
 }
 
 impl Running {
@@ -208,6 +210,12 @@ impl Desktop {
             catalogue: Catalogue::builtin(),
             pager: Pager::default(),
         }
+        .with_group("Examples", crate::EXAMPLES)
+    }
+
+    fn with_group(mut self, group: &'static str, apps: &'static [AppInfo]) -> Self {
+        self.register_group(group, apps);
+        self
     }
 
     /// Add an app to the launcher. Apps of the main group ([`launcher::MAIN`],
@@ -323,6 +331,7 @@ impl Desktop {
             next_bg_tick: 0,
             heap: (0, 0),
             granted: Capabilities::NONE,
+            frame_us: 0,
         });
         self.fg = Some(tag);
         self.keyboard_open = false;
@@ -453,6 +462,7 @@ impl Desktop {
                     sram,
                     psram,
                     note: note.into(),
+                    frame_us: r.frame_us,
                 }
             })
             .collect();
@@ -1042,6 +1052,7 @@ impl Desktop {
         sys.set_heap_owner(prev);
         ui.canvas.restore_clip(old);
         r.cpu.add(us);
+        r.frame_us = us.min(u32::MAX as u64) as u32;
         self.keyboard_open = r.ui.wants_keyboard;
         let tick = r.app.tick_interval_ms();
 
@@ -1200,6 +1211,9 @@ impl System for SysProxy<'_> {
             AppHandle::Builtin(tag) => self.close.push(tag),
             AppHandle::User(_) => self.inner.close_app(app),
         }
+    }
+    fn config_remove(&mut self, key: &str) {
+        self.inner.config_remove(key)
     }
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         self.inner.fill_random(buf)
@@ -1482,9 +1496,12 @@ mod tests {
     fn page_swipe_moves_between_pages_and_icons_still_tap() {
         let mut r = with_examples();
         assert_eq!(r.d.home_page(), 0);
-        r.swipe((400, 400), (80, 400), 0);
-        assert_eq!(r.d.home_page(), 1);
-        r.idle(300);
+        let last = r.d.catalogue.pages(12).len() - 1;
+        for page in 1..=last {
+            r.swipe((400, 400), (80, 400), 0);
+            r.idle(300);
+            assert_eq!(r.d.home_page(), page);
+        }
         // The first slot of the Examples page.
         r.tap(80, STATUS_H + 40 + 50);
         r.frame();
@@ -1492,9 +1509,9 @@ mod tests {
         // The page is kept while the app runs and after going home.
         r.swipe((240, 795), (240, 600), 0);
         r.idle(300);
-        assert_eq!(r.d.home_page(), 1);
+        assert_eq!(r.d.home_page(), last);
         r.swipe((80, 400), (400, 400), 0);
-        assert_eq!(r.d.home_page(), 0);
+        assert_eq!(r.d.home_page(), last - 1);
     }
 
     #[test]
