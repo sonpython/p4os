@@ -33,6 +33,8 @@ const IDLE_TICK_MS: u32 = 250;
 const BACKGROUND_TICK_MS: u32 = 500;
 /// Landscape controls stay visible this long after a tap.
 const OVERLAY_MS: u64 = 4000;
+/// Longest time between full repaints of the portrait screen.
+const FULL_REDRAW_MS: u64 = 500;
 
 const YT_RED: Color = Color::hex(0xff0033);
 const VIDEO_BG: Color = Color::BLACK;
@@ -103,7 +105,9 @@ pub enum ViewEvent {
 }
 
 /// The player screen, embeddable in another app: forward `update`,
-/// `tick_interval_ms`, `fullscreen` and `close`.
+/// `tick_interval_ms`, `fullscreen`, `background`, `keep_awake` and `close`.
+/// The screen repaints only the picture between most frames, so the host
+/// must not paint over `area` itself.
 #[derive(Default)]
 pub struct PlayerView {
     player: Option<Player>,
@@ -116,6 +120,8 @@ pub struct PlayerView {
     row: Vec<Color>,
     /// Progress bar drag in progress: fraction under the finger.
     scrub: Option<f32>,
+    /// Last full portrait repaint: time, state signature, area.
+    last_full: Option<(u64, String, Rect)>,
 }
 
 impl PlayerView {
@@ -140,6 +146,8 @@ impl PlayerView {
     /// on; video pictures are consumed but not shown.
     pub fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
         self.handle_commands(sys);
+        // The lock screen paints over us: repaint everything on return.
+        self.last_full = None;
         let p = self.player.as_mut()?;
         p.background = true;
         p.tick(sys);
@@ -242,6 +250,17 @@ impl PlayerView {
 
     fn portrait_screen(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) -> ViewEvent {
         let video = Rect::new(area.x, area.y, area.w, area.w * 9 / 16);
+        // Between video frames only the picture changes: repaint the rest
+        // on input, on a state change and twice a second (time, progress).
+        let now = sys.uptime_ms();
+        let i = ui.input;
+        let sig = self.player.as_ref().map(ui_signature).unwrap_or_default();
+        let stale = self.last_full.as_ref().is_none_or(|(t, s, a)| now >= t + FULL_REDRAW_MS || *s != sig || *a != area);
+        if !(stale || i.down || i.pressed || i.released || !i.keys.is_empty()) {
+            self.draw_media(ui, video, sys);
+            return ViewEvent::None;
+        }
+        self.last_full = Some((now, sig, area));
         // Each pixel is written once: the video area paints itself.
         ui.fill(Rect::new(area.x, video.bottom(), area.w, area.bottom() - video.bottom()), ui.theme.bg);
         self.draw_media(ui, video, sys);
@@ -446,6 +465,12 @@ impl PlayerView {
             ui.text(b, "Audio only", &small, Color::WHITE, Align::Center);
         }
     }
+}
+
+/// What the portrait screen shows besides the picture and the clock; a
+/// change forces a full repaint.
+fn ui_signature(p: &Player) -> String {
+    format!("{:?}|{}|{}|{:?}|{:?}|{:?}|{}", p.phase, p.paused, p.buffering, p.presentation(), p.mode, p.notice, p.info.is_some())
 }
 
 /// "H.264 144p + Opus, 24.8 fps" and similar.

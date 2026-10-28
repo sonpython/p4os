@@ -1266,7 +1266,11 @@ impl App for YouTube {
         self.ensure_loaded();
 
         let t = *ui.theme;
-        ui.fill(area, t.bg);
+        // The player repaints only what changes between video frames, so
+        // its area is left alone (the header below is always redrawn).
+        if !matches!(self.stack.last(), Some(Screen::Player(_))) {
+            ui.fill(area, t.bg);
+        }
         let mut action: Option<Action>;
         if let Some(screen) = self.stack.last_mut() {
             let (head, body) = area.split_top(HEADER_H);
