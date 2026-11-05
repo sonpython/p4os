@@ -8,3 +8,4 @@
 /.claude/
 # Simulator renders; regenerate with the scripts in docs/screenshots/
 /docs/screenshots/*.png
+*.pyc

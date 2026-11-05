@@ -1,0 +1,36 @@
+# Vendored from crates.io rusty_h264-common 0.16.1 (see ../README.md).
+[package]
+name = "rusty_h264-common"
+version = "0.16.1"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Mata Network"]
+license = "BSD-2-Clause"
+description = "Shared primitives for the rusty_h264 pure-Rust H.264 codec (vendored, scalar no_std build)"
+repository = "https://github.com/remade-with-rust/rusty_h264"
+build = "build.rs"
+publish = false
+
+[lib]
+name = "rusty_h264_common"
+path = "src/lib.rs"
+
+[features]
+default = []
+std = []
+libm = ["dep:libm"]
+profile = ["std"]
+knobs = []
+census = []
+# Upstream's x86-64 SIMD kernels live in rusty_h264-accel, which is not
+# vendored. Kept only so the cfgs in the sources stay declared: never enable.
+asm = []
+
+[dependencies]
+bytemuck = "1"
+libm = { version = "0.2", optional = true }
+once_cell = { version = "1", default-features = false, features = ["race", "alloc"] }
+wide = { version = "0.7", default-features = false }
+
+[target.'cfg(not(target_has_atomic = "64"))'.dependencies]
+portable-atomic = { version = "1", default-features = false, features = ["fallback"] }

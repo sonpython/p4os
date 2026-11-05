@@ -27,7 +27,7 @@ use p4os_sdk::gui::keyboard::{self, Keyboard};
 use p4os_sdk::gui::ui::{Align, Input, Key, Theme, UiState};
 use p4os_sdk::{
     App, AppHandle, AppInfo, AppState, AppUsage, Audio, Canvas, Capabilities, Color, DateTime, FileSystem, Image, Network,
-    Orientation, Point, Rect, System, SystemStats, Ui,
+    Orientation, Point, Rect, System, SystemStats, Ui, WorkerJob,
 };
 
 pub const STATUS_H: i32 = 36;
@@ -299,6 +299,11 @@ impl Desktop {
     }
 
     fn start(&mut self, id: &str, sys: &mut dyn System) {
+        // `launch("")`: the app asks to leave (a fullscreen player's Back).
+        if id.is_empty() {
+            self.go_home(sys, false);
+            return;
+        }
         let Some(info) = self.catalogue.find(id) else {
             sys.log(&format!("desktop: no app '{id}'"));
             return;
@@ -480,10 +485,21 @@ impl Desktop {
     pub fn frame(&mut self, canvas: &mut Canvas, input: &Input, sys: &mut dyn System) -> Option<u32> {
         let started_us = sys.uptime_us();
         let now = sys.uptime_ms();
+        // `yt play` on the console (or another app) queued a video.
+        if p4os_ytplay::remote::pending() && self.running_app() != Some(p4os_ytplay::app::APP_ID) && !self.lock.is_locked() {
+            if let Some(tag) = self.fg {
+                self.pending_snapshot = Some(tag);
+            }
+            self.start(p4os_ytplay::app::APP_ID, sys);
+        }
         let screen = canvas.bounds();
-        let (status, rest) = screen.split_top(STATUS_H);
-        let body = Rect::new(rest.x, rest.y, rest.w, rest.h - HOME_BAR_H);
-        let strip = Rect::new(rest.x, body.bottom(), rest.w, HOME_BAR_H);
+        // A fullscreen app (video) also covers the status, title and home
+        // bars; the gesture zones stay where they are.
+        let fullscreen = self.switcher.is_none() && self.fg_app().is_some_and(|r| r.app.fullscreen());
+        let (status, rest) = if fullscreen { (Rect::default(), screen) } else { screen.split_top(STATUS_H) };
+        let bar_h = if fullscreen { 0 } else { HOME_BAR_H };
+        let body = Rect::new(rest.x, rest.y, rest.w, rest.h - bar_h);
+        let strip = Rect::new(rest.x, body.bottom(), rest.w, bar_h);
         if let Some(tag) = self.pending_snapshot.take() {
             self.capture(canvas, body, tag);
         }
@@ -563,7 +579,7 @@ impl Desktop {
         if self.switcher.is_some() {
             self.switcher_frame(canvas, &content_input, body, &mut proxy, now);
         } else if self.fg.is_some() {
-            (next, leave) = self.app_frame(canvas, &content_input, body, &mut proxy, now);
+            (next, leave) = self.app_frame(canvas, &content_input, body, &mut proxy, now, fullscreen);
         } else {
             self.home_frame(canvas, &content_input, body, &mut proxy, now);
             self.draw_home_anim(canvas, body, now);
@@ -576,7 +592,9 @@ impl Desktop {
         }
 
         let t = self.theme;
-        feedback::home_indicator(canvas, strip, Color::hex(0x080a0f), if self.track.is_some() { t.surface_alt } else { t.text_dim });
+        if !fullscreen {
+            feedback::home_indicator(canvas, strip, Color::hex(0x080a0f), if self.track.is_some() { t.surface_alt } else { t.text_dim });
+        }
         if let Some(tr) = &self.track {
             feedback::track(canvas, screen, tr, &self.gestures.cfg, t.accent);
         }
@@ -584,7 +602,9 @@ impl Desktop {
             self.hang_dialog(canvas, input, body, &mut proxy);
         }
         self.draw_notice(canvas, body, now);
-        self.status_bar(canvas, input, status, &mut proxy);
+        if !fullscreen {
+            self.status_bar(canvas, input, status, &mut proxy);
+        }
 
         if proxy.lock {
             self.lock.lock_now(proxy.inner);
@@ -632,6 +652,15 @@ impl Desktop {
             wait = wait.min(until.saturating_sub(now).max(1) as u32);
         }
         Some(wait)
+    }
+
+    /// The foreground app asks the screen to stay on (video playing).
+    pub fn keep_awake(&self) -> bool {
+        !self.lock.is_locked() && self.fg_app().is_some_and(|r| r.app.keep_awake())
+    }
+
+    fn fg_app(&self) -> Option<&Running> {
+        self.fg.and_then(|t| self.find(t)).map(|i| &self.running[i])
     }
 
     /// Run background work without drawing, for when nothing is shown
@@ -742,10 +771,8 @@ impl Desktop {
                 continue;
             }
             if now >= r.next_bg_tick {
-                if r.cpu.bg_allowed(&self.limits) {
-                    call(r, sys, |app, sys| app.background_tick(sys));
-                }
-                let every = r.app.tick_interval_ms().unwrap_or(STATUS_TICK_MS).max(self.limits.bg_min_tick_ms);
+                let asked = if r.cpu.bg_allowed(&self.limits) { call(r, sys, |app, sys| app.background_tick(sys)).0 } else { None };
+                let every = asked.or(r.app.tick_interval_ms()).unwrap_or(STATUS_TICK_MS).max(self.limits.bg_min_tick_ms);
                 r.next_bg_tick = now + every as u64;
             }
             due = Some(due.map_or(r.next_bg_tick, |d| d.min(r.next_bg_tick)));
@@ -1025,9 +1052,9 @@ impl Desktop {
 
     /// Draw the foreground app with its title bar. Returns its tick request
     /// and whether the user asked to go home.
-    fn app_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy, now: u64) -> (Option<u32>, bool) {
+    fn app_frame(&mut self, canvas: &mut Canvas, input: &Input, body: Rect, sys: &mut SysProxy, now: u64, fullscreen: bool) -> (Option<u32>, bool) {
         let Some(idx) = self.fg.and_then(|t| self.find(t)) else { return (None, false) };
-        let (title_r, mut area) = body.split_top(TITLE_H);
+        let (title_r, mut area) = if fullscreen { (Rect::default(), body) } else { body.split_top(TITLE_H) };
         let mut app_input = input.clone();
         let r = &mut self.running[idx];
 
@@ -1053,18 +1080,21 @@ impl Desktop {
         let name = r.info.name;
         let mut ui = Ui { canvas, input: &app_input, theme: &self.theme, fonts: &self.fonts, state: &mut r.ui };
         let t = *ui.theme;
-        ui.fill(title_r, t.surface);
-        ui.canvas.fill_rect(Rect::new(title_r.x, title_r.bottom() - 1, title_r.w, 1), t.border);
-        let back = Rect::new(title_r.x + 8, title_r.y + 6, 130, title_r.h - 12);
-        let home = ui.icon_button(back, |c, r, col| {
-            let cy = r.y + r.h / 2;
-            c.line(Point::new(r.x + 26, cy - 10), Point::new(r.x + 16, cy), 3.0, col);
-            c.line(Point::new(r.x + 16, cy), Point::new(r.x + 26, cy + 10), 3.0, col);
-        });
-        let f = ui.fonts.body;
-        ui.text(Rect::new(back.x + 36, back.y, 90, back.h), "Home", &f, t.text, Align::Left);
-        let bold = ui.fonts.bold;
-        ui.text(title_r, name, &bold, t.text, Align::Center);
+        let mut home = false;
+        if !fullscreen {
+            ui.fill(title_r, t.surface);
+            ui.canvas.fill_rect(Rect::new(title_r.x, title_r.bottom() - 1, title_r.w, 1), t.border);
+            let back = Rect::new(title_r.x + 8, title_r.y + 6, 130, title_r.h - 12);
+            home = ui.icon_button(back, |c, r, col| {
+                let cy = r.y + r.h / 2;
+                c.line(Point::new(r.x + 26, cy - 10), Point::new(r.x + 16, cy), 3.0, col);
+                c.line(Point::new(r.x + 16, cy), Point::new(r.x + 26, cy + 10), 3.0, col);
+            });
+            let f = ui.fonts.body;
+            ui.text(Rect::new(back.x + 36, back.y, 90, back.h), "Home", &f, t.text, Align::Left);
+            let bold = ui.fonts.bold;
+            ui.text(title_r, name, &bold, t.text, Align::Center);
+        }
 
         ui.state.wants_keyboard = false;
         let old = ui.canvas.set_clip(area);
@@ -1237,6 +1267,9 @@ impl System for SysProxy<'_> {
     }
     fn config_remove(&mut self, key: &str) {
         self.inner.config_remove(key)
+    }
+    fn spawn_worker(&mut self, name: &'static str, core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        self.inner.spawn_worker(name, core, stack_size, job)
     }
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         self.inner.fill_random(buf)
@@ -1434,6 +1467,93 @@ mod tests {
         assert!(r.d.is_locked());
         assert!(r.d.switcher.is_none());
         assert_eq!(r.d.running_app(), Some("calculator"), "nothing reached the app manager");
+    }
+
+    /// A video-player-like app: fullscreen, plays "audio" in the background
+    /// and counts its background ticks.
+    #[derive(Default)]
+    struct Media {
+        playing: bool,
+        bg_ticks: u32,
+        leave: bool,
+    }
+    static MEDIA_TICKS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    impl App for Media {
+        fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) {
+            ui.fill(area, Color::hex(0x00ff00));
+            self.playing = true;
+            if self.leave {
+                sys.launch("");
+            }
+            self.leave = ui.input.keys.contains(&Key::Char('q'));
+        }
+        fn fullscreen(&self) -> bool {
+            true
+        }
+        fn background_work(&self) -> Capabilities {
+            if self.playing { Capabilities::AUDIO } else { Capabilities::NONE }
+        }
+        fn background_tick(&mut self, _sys: &mut dyn System) -> Option<u32> {
+            self.bg_ticks += 1;
+            MEDIA_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Some(500)
+        }
+    }
+    fn media_create() -> Box<dyn App> {
+        Box::new(Media::default())
+    }
+    static MEDIA: AppInfo = AppInfo { id: "media", name: "Media", icon: demo_icon, create: media_create, background: Capabilities::AUDIO };
+
+    #[test]
+    fn fullscreen_app_hides_the_bars_but_swipe_up_still_goes_home() {
+        let mut r = Rig::new();
+        r.d.register_app("Test", &MEDIA);
+        r.launch("media");
+        r.frame();
+        // The app paints the whole screen: status bar row and home bar too.
+        assert_eq!(r.buf[5 * 480 + 240], Color::hex(0x00ff00));
+        assert_eq!(r.buf[798 * 480 + 240], Color::hex(0x00ff00));
+        r.swipe((240, 797), (240, 600), 0);
+        assert_eq!(r.d.running_app(), None);
+        // Playing media keeps running in the background, at its own pace.
+        assert_eq!(r.state_of("Media"), Some(AppState::Background));
+        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        r.idle(1600);
+        let ticks = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) - before;
+        assert!((2..=4).contains(&ticks), "{ticks} background ticks in 1.6 s at 500 ms");
+    }
+
+    #[test]
+    fn launch_empty_goes_home() {
+        let mut r = Rig::new();
+        r.d.register_app("Test", &MEDIA);
+        r.launch("media");
+        r.input.keys.push(Key::Char('q'));
+        r.frame();
+        r.frame();
+        assert_eq!(r.d.running_app(), None);
+        assert!(!r.sys.log.iter().any(|l| l.contains("no app")), "{:?}", r.sys.log);
+    }
+
+    #[test]
+    fn locked_foreground_media_keeps_playing() {
+        let mut r = Rig::new();
+        r.d.register_app("Test", &MEDIA);
+        r.launch("media");
+        r.frame();
+        r.sys.config_set(p4os_sdk::config::LOCK_ENABLED, "1");
+        r.sys.config_set(p4os_sdk::config::LOCK_PIN, "any-hash");
+        r.d.lock_now(&mut r.sys);
+        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        r.idle(1600);
+        assert!(MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) > before, "ticks while locked");
+        assert_eq!(r.state_of("Media"), Some(AppState::Foreground));
+        // Screen off: no frames at all, the step still runs it.
+        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        r.sys.advance(600);
+        assert_eq!(r.d.background_step(&mut r.sys).map(|ms| ms <= 500), Some(true));
+        assert!(MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) > before);
+        assert!(!r.d.keep_awake());
     }
 
     #[test]

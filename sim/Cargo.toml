@@ -10,4 +10,5 @@ p4os-sdk = { path = "../sdk" }
 p4os-apps = { path = "../apps" }
 p4os-media = { path = "../media" }
 p4os-net = { path = "../net" }
+p4os-ytplay = { path = "../ytplay" }
 png = "0.17"

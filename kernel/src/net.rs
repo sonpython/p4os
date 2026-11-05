@@ -445,6 +445,12 @@ impl Net {
                         (d.len(), ())
                     });
                 }
+                // Done when the server closes, or once the declared length
+                // arrived (some servers keep the connection open).
+                if let Some(n) = http::complete_len(raw) {
+                    raw.truncate(n);
+                    return Step::Response(core::mem::take(raw));
+                }
                 if !sock.may_recv() || !sock.is_open() {
                     Step::Response(core::mem::take(raw))
                 } else {
@@ -472,6 +478,12 @@ impl Net {
                     );
                 }
                 plain.extend(client.take_plaintext());
+                if !client.is_handshaking()
+                    && let Some(n) = http::complete_len(plain)
+                {
+                    plain.truncate(n);
+                    return Step::Response(core::mem::take(plain));
+                }
                 let out = client.pending_output();
                 if !out.is_empty() && sock.can_send() {
                     match sock.send_slice(out) {

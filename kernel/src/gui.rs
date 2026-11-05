@@ -104,6 +104,9 @@ fn run(_: usize) {
             input.delta = Point::default();
             input.keys.clear();
         }
+        if desktop.keep_awake() {
+            last_input = now;
+        }
         let idle = now.saturating_sub(last_input);
         if power::off_after_ms().is_some_and(|t| idle >= t) {
             set_screen(&mut screen, Screen::Off, &mut sys, &mut desktop);
@@ -611,6 +614,10 @@ impl System for KernelSystem {
         if let AppHandle::User(tid) = app {
             crate::appctl::kill(tid as usize);
         }
+    }
+
+    fn spawn_worker(&mut self, name: &'static str, core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        crate::worker::spawn(name, core, stack_size, job)
     }
 }
 

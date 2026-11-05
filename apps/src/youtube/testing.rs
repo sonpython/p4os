@@ -5,7 +5,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use p4os_sdk::{
-    Audio, Color, DateTime, FetchId, FetchState, FileSystem, HttpRequest, Image, Network, System, SystemStats,
+    Audio, Color, DateTime, FetchId, FetchState, FileSystem, FsError, HttpRequest, Image, Network, System, SystemStats,
 };
 
 #[derive(Default)]
@@ -117,6 +117,54 @@ pub struct TestSys {
     pub config: BTreeMap<String, String>,
     pub uptime: u64,
     pub decoded: usize,
+    /// For the on-device player: no SD card, silent audio.
+    pub fs: NoCard,
+    pub audio: NullAudio,
+}
+
+/// A file system without a card.
+#[derive(Default)]
+pub struct NoCard;
+
+impl FileSystem for NoCard {
+    fn list(&mut self, _path: &str) -> Result<Vec<p4os_sdk::DirEntry>, FsError> {
+        Err(FsError::NoMedium)
+    }
+    fn read(&mut self, _path: &str) -> Result<Vec<u8>, FsError> {
+        Err(FsError::NoMedium)
+    }
+    fn write(&mut self, _path: &str, _data: &[u8]) -> Result<(), FsError> {
+        Err(FsError::NoMedium)
+    }
+    fn open(&mut self, _path: &str) -> Result<alloc::boxed::Box<dyn p4os_sdk::FileReader>, FsError> {
+        Err(FsError::NoMedium)
+    }
+}
+
+/// Audio output that accepts sources and never plays them.
+#[derive(Default)]
+pub struct NullAudio {
+    playing: bool,
+}
+
+impl Audio for NullAudio {
+    fn play(&mut self, _source: alloc::boxed::Box<dyn p4os_sdk::AudioSource>) {
+        self.playing = true;
+    }
+    fn pause(&mut self, _paused: bool) {}
+    fn stop(&mut self) {
+        self.playing = false;
+    }
+    fn state(&self) -> p4os_sdk::PlaybackState {
+        if self.playing { p4os_sdk::PlaybackState::Paused } else { p4os_sdk::PlaybackState::Stopped }
+    }
+    fn position_frames(&self) -> u64 {
+        0
+    }
+    fn set_volume(&mut self, _volume: f32) {}
+    fn volume(&self) -> f32 {
+        1.0
+    }
 }
 
 impl System for TestSys {
@@ -128,10 +176,10 @@ impl System for TestSys {
     }
     fn set_time(&mut self, _t: DateTime) {}
     fn fs(&mut self) -> &mut dyn FileSystem {
-        unimplemented!("the YouTube app does not use files")
+        &mut self.fs
     }
     fn audio(&mut self) -> &mut dyn Audio {
-        unimplemented!("the YouTube app does not use audio")
+        &mut self.audio
     }
     fn net(&mut self) -> &mut dyn Network {
         &mut self.net

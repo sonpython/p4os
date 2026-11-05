@@ -865,8 +865,9 @@ impl App for Browser {
         if self.loading.is_some() { Capabilities::NETWORK } else { Capabilities::NONE }
     }
 
-    fn background_tick(&mut self, sys: &mut dyn System) {
+    fn background_tick(&mut self, sys: &mut dyn System) -> Option<u32> {
         self.poll(sys);
+        None
     }
 
     fn on_stop(&mut self, sys: &mut dyn System) {

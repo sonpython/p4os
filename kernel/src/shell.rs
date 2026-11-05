@@ -60,7 +60,7 @@ fn execute(cmd: &str, serial: bool) {
     match cmd.trim() {
         "" => {}
         "help" => kprintln!(
-            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get dl play stop power smpdemo apps run start kill top tap swipe pmp crash screenshot"
+            "commands: help uptime clock irq ps mem demo membench bench lcd hwscan flash config \"config set KEY VALUE\" \"config unset KEY\" \"config stress N\" wifi lock get yt dl play stop power smpdemo apps run start kill top tap swipe pmp crash screenshot"
         ),
         "flash" => crate::flash::diagnose(),
         c if c == "power" || c.starts_with("power ") => crate::power::command(&c["power".len()..]),
@@ -100,6 +100,7 @@ fn execute(cmd: &str, serial: bool) {
         "audio" => crate::audio::diagnose(),
         "c6" => crate::c6::probe(),
         c if c.starts_with("get ") => http_get(c[4..].trim()),
+        c if c == "yt" || c.starts_with("yt ") => crate::yt::command(&c[2..]),
         c if c.starts_with("dl ") => download(c[3..].trim()),
         c if c.starts_with("play ") => play_file(c[5..].trim()),
         "stop" => {

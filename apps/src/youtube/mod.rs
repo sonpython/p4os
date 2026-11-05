@@ -40,7 +40,7 @@ use qr::Qr;
 use quota::Quota;
 use thumbs::Thumbs;
 
-pub const INFO: AppInfo = AppInfo { id: "youtube", name: "YouTube", icon, create, background: p4os_sdk::Capabilities::NONE };
+pub const INFO: AppInfo = AppInfo { id: "youtube", name: "YouTube", icon, create, background: p4os_sdk::Capabilities::AUDIO };
 
 fn create() -> Box<dyn App> {
     Box::new(YouTube::new())
@@ -1266,7 +1266,11 @@ impl App for YouTube {
         self.ensure_loaded();
 
         let t = *ui.theme;
-        ui.fill(area, t.bg);
+        // The player repaints only what changes between video frames, so
+        // its area is left alone (the header below is always redrawn).
+        if !matches!(self.stack.last(), Some(Screen::Player(_))) {
+            ui.fill(area, t.bg);
+        }
         let mut action: Option<Action>;
         if let Some(screen) = self.stack.last_mut() {
             let (head, body) = area.split_top(HEADER_H);
@@ -1356,6 +1360,25 @@ impl App for YouTube {
         self.client.close(sys.net());
         self.thumbs.clear(sys);
         self.save_quota(sys, true);
+    }
+
+    /// A playing video keeps the app running in the background.
+    fn background_work(&self) -> p4os_sdk::Capabilities {
+        match self.stack.last() {
+            Some(Screen::Player(p)) if p.playing() => p4os_sdk::Capabilities::AUDIO,
+            _ => p4os_sdk::Capabilities::NONE,
+        }
+    }
+
+    fn background_tick(&mut self, sys: &mut dyn System) -> Option<u32> {
+        match self.stack.last_mut() {
+            Some(Screen::Player(p)) => p.background(sys),
+            _ => None,
+        }
+    }
+
+    fn keep_awake(&self) -> bool {
+        matches!(self.stack.last(), Some(Screen::Player(p)) if p.keep_awake())
     }
 }
 

@@ -118,7 +118,13 @@ pub trait App {
     /// Background work needed right now, limited to `AppInfo::background`,
     /// and the periodic call that does it while the app is off screen.
     fn background_work(&self) -> Capabilities { Capabilities::NONE }
-    fn background_tick(&mut self, _sys: &mut dyn System) {}
+    /// Returns how soon to be called again; `None` uses tick_interval_ms.
+    fn background_tick(&mut self, _sys: &mut dyn System) -> Option<u32> { None }
+
+    /// Video: take the whole screen (no status, title or home bar; the
+    /// gestures still work), and keep the screen from turning off.
+    fn fullscreen(&self) -> bool { false }
+    fn keep_awake(&self) -> bool { false }
 }
 ```
 
@@ -703,7 +709,9 @@ The `p4os-sdk` traits, from [`sdk/src/lib.rs`](../sdk/src/lib.rs). Methods with 
 | `fn on_low_memory(&mut self, sys)` | Drop caches that can be rebuilt |
 | `fn on_stop(&mut self, sys)` | About to be destroyed; release audio, cancel requests, save |
 | `fn background_work(&self) -> Capabilities` | Background capabilities needed now (only declared ones are granted) |
-| `fn background_tick(&mut self, sys)` | Periodic work while in the background (no drawing) |
+| `fn background_tick(&mut self, sys) -> Option<u32>` | Periodic work while not drawn: in the background, or in the foreground while the screen is locked or off; returns the next delay (`None`: `tick_interval_ms`) |
+| `fn fullscreen(&self) -> bool` | Take the whole screen (video); gestures, Escape and `sys.launch("")` still lead home |
+| `fn keep_awake(&self) -> bool` | Keep the screen on (video playing) |
 
 `AppInfo { id: &'static str, name: &'static str, icon: fn(&mut Canvas, Rect), create: fn() -> Box<dyn App>, background: Capabilities }`, with `Capabilities::NONE`, `AUDIO` or `NETWORK`.
 

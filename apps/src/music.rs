@@ -401,9 +401,10 @@ impl App for Music {
         if self.active && self.state != Some(PlaybackState::Paused) { Capabilities::AUDIO } else { Capabilities::NONE }
     }
 
-    fn background_tick(&mut self, sys: &mut dyn System) {
+    fn background_tick(&mut self, sys: &mut dyn System) -> Option<u32> {
         self.poll(sys);
         self.state = Some(sys.audio().state());
+        None
     }
 }
 
