@@ -13,6 +13,7 @@
 //! on GPIO5 -> panel RESX, backlight boost enable on GPIO23).
 
 use crate::sched::{self, notify_bits};
+use crate::sync::Mutex;
 use crate::{gpio, irq, kprintln, mmio, psram, soc, systimer};
 use alloc::alloc::{alloc_zeroed, Layout};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -118,6 +119,17 @@ static ASLEEP: AtomicBool = AtomicBool::new(false);
 /// Thread blocked in `present`, notified when its buffer goes on screen.
 /// Written before `PENDING`, so the handler that takes `PENDING` sees it.
 static FLIP_WAITER: AtomicUsize = AtomicUsize::new(0);
+/// `FRAME_*` flags of the frame waiting to flip and of the one on screen.
+static PENDING_INFO: AtomicU32 = AtomicU32::new(0);
+static FRONT_INFO: AtomicU32 = AtomicU32::new(0);
+/// Held across a flip, and by a reader of the front buffer: while a reader
+/// holds it the front buffer can neither change nor be drawn into.
+static FLIP_GATE: Mutex<()> = Mutex::new(());
+
+/// The frame is a landscape picture rotated into the portrait panel.
+pub const FRAME_LANDSCAPE: u32 = 1 << 0;
+/// The frame shows sensitive input (passcode entry) and must not be captured.
+pub const FRAME_SECURE: u32 = 1 << 1;
 
 fn field(addr: usize, hi: u32, lo: u32, value: u32) {
     let mask = (((1u64 << (hi - lo + 1)) - 1) as u32) << lo;
@@ -335,6 +347,7 @@ fn on_frame_done() {
     }
     let pending = PENDING.swap(0, Ordering::AcqRel);
     if pending != 0 {
+        FRONT_INFO.store(PENDING_INFO.load(Ordering::Acquire), Ordering::Release);
         FRONT.store(pending, Ordering::Release);
         sched::notify(FLIP_WAITER.load(Ordering::Relaxed), notify_bits::DISPLAY_FLIP);
     }
@@ -437,15 +450,41 @@ pub fn wake() {
 /// Make `fb` visible at the next frame boundary and block until it is.
 /// After this returns the previous front buffer is free to draw into.
 /// While the panel sleeps the buffer just becomes the front buffer.
+/// The frame keeps the `FRAME_*` flags of the one it replaces.
 pub fn present(fb: &Framebuffer) {
+    present_with(fb, FRONT_INFO.load(Ordering::Acquire));
+}
+
+/// `present` with the frame's `FRAME_*` flags, recorded for readers of
+/// the front buffer (screenshots), also while the panel sleeps.
+pub fn present_with(fb: &Framebuffer, info: u32) {
+    psram::cache_writeback(fb.ptr as usize, FB_BYTES);
+    let _gate = FLIP_GATE.lock();
     if ASLEEP.load(Ordering::Acquire) {
+        FRONT_INFO.store(info, Ordering::Release);
         FRONT.store(fb.ptr as usize, Ordering::Release);
         return;
     }
-    psram::cache_writeback(fb.ptr as usize, FB_BYTES);
+    PENDING_INFO.store(info, Ordering::Release);
     FLIP_WAITER.store(sched::my_id(), Ordering::Relaxed);
     PENDING.store(fb.ptr as usize, Ordering::Release);
     sched::wait_notify(notify_bits::DISPLAY_FLIP);
+}
+
+/// Run `f` on the pixels on screen (panel order, `WIDTH` x `HEIGHT`) and
+/// their `FRAME_*` flags. Flips wait until `f` returns, so the picture is
+/// one whole frame. `None` when the display is not running.
+pub fn with_front<R>(f: impl FnOnce(&[u16], u32) -> R) -> Option<R> {
+    let _gate = FLIP_GATE.lock();
+    let front = FRONT.load(Ordering::Acquire);
+    if front == 0 {
+        return None;
+    }
+    // Drop stale lines this core may hold from an earlier read; the GUI
+    // wrote the buffer back before presenting it, so nothing dirty is lost.
+    psram::cache_invalidate(front, FB_BYTES);
+    let pixels = unsafe { core::slice::from_raw_parts(front as *const u16, WIDTH * HEIGHT) };
+    Some(f(pixels, FRONT_INFO.load(Ordering::Acquire)))
 }
 
 /// Print pipeline health: frame/underrun counters and raw status registers.

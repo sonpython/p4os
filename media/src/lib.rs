@@ -6,3 +6,4 @@ extern crate alloc;
 
 pub mod audio;
 pub mod image;
+pub mod shot;
