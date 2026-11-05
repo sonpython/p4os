@@ -4,9 +4,12 @@ A from-scratch operating system for the **ESP32-P4**, written entirely in Rust: 
 
 p4os has a preemptive scheduler running on both CPU cores, isolated user-mode apps, a touch desktop with a dozen apps, Wi-Fi with HTTPS, an SD card file system and settings that survive reboots. It is a learning and research project, under active development, and runs on real hardware.
 
-| Home screen (camera capture of the board) | Browser over Wi-Fi | YouTube (simulator, sample data) | Lock screen |
-|---|---|---|---|
-| ![home](screenshots/board-home.png) | ![browser](screenshots/board-browser-example.png) | ![youtube](screenshots/youtube-feed.png) | ![lock](screenshots/lock-portrait.png) |
+<p align="center">
+  <a href="media/p4os-demo.mp4"><img src="media/p4os-demo-preview.gif" width="220" alt="p4os running on the board: Calculator, Photos, Notes, home screen, Music, Browser, Monitor, Settings, lock-screen passcode, 2048 and the Examples folder (8x speed)"></a>
+  <img src="media/p4os-home.jpg" width="220" alt="p4os home screen on the Guition JC4880P443C">
+  <img src="media/p4os-lock-screen.jpg" width="220" alt="p4os lock screen with passcode keypad">
+</p>
+<p align="center"><sub>p4os on the real board. The animation is the <a href="media/p4os-demo.mp4">2.5-minute demo video</a> at 8x speed; click it for the full video.</sub></p>
 
 ## Hardware
 
@@ -20,11 +23,9 @@ p4os has a preemptive scheduler running on both CPU cores, isolated user-mode ap
 | Storage | microSD (SDMMC, 4-bit) |
 | Audio | ES8311 codec over I2S, speaker amplifier |
 
-<p align="center">
-  <img src="images/board/jc4880p443c-front-back.webp" width="48%" alt="Guition JC4880P443C: front with the 4.3-inch touch screen, back with the ESP32-P4 module">
-  <img src="images/board/jc4880p443c-board-c6.webp" width="48%" alt="Guition JC4880P443C board with the ESP32-C6 Wi-Fi 6 / Bluetooth 5 co-processor">
-</p>
-<p align="center"><sub>Product images: Guition, from the <a href="https://vi.aliexpress.com/item/1005009618259341.html">JC4880P443C_I_W product listing</a>, used with the seller's permission.</sub></p>
+<p align="center"><img src="media/board-back.jpg" width="320" alt="Back of the Guition JC4880P443C: ESP32-P4 module, microSD slot, speaker connector and USB-C ports"></p>
+
+Product page: [Guition JC4880P443C_I_W on AliExpress](https://vi.aliexpress.com/item/1005009618259341.html).
 
 The board is the Guition JC4880P443C, not the Espressif EV board; pins and init sequences come from the vendor package and register dumps of the factory firmware.
 
@@ -88,9 +89,6 @@ Board setup, shell commands, pitfalls and recovery are in [getting-started.md](g
 - **Built-in apps** implement the `App` trait, draw with the immediate-mode toolkit, and use OS services through `System` (files, settings, HTTP/HTTPS, clock, audio, orientation). They are unit-tested on the host and screenshotted in the simulator. Examples: [`apps/src/examples/`](../apps/src/examples/).
 - **User-mode apps** are separate binaries confined by PMP, talking to the kernel through six syscalls. Example: [`userapps/ticker/`](../userapps/ticker/src/main.rs).
 
-| Hello Counter | Lap Timer | Weather (Open-Meteo over HTTPS) |
-|---|---|---|
-| ![](screenshots/example-hello.png) | ![](screenshots/example-laps.png) | ![](screenshots/example-weather.png) |
 
 ## Repository layout
 
