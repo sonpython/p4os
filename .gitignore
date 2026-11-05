@@ -6,3 +6,5 @@
 !gui/fonts/*.bin
 # Local agent worktrees and tool state
 /.claude/
+# Simulator renders; regenerate with the scripts in docs/screenshots/
+/docs/screenshots/*.png
