@@ -1281,6 +1281,7 @@ impl System for SysProxy<'_> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::testsys::TestSys;
 
@@ -1477,7 +1478,13 @@ mod tests {
         bg_ticks: u32,
         leave: bool,
     }
-    static MEDIA_TICKS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    // Per test thread: tests run in parallel and each counts its own app's ticks.
+    std::thread_local! {
+        static MEDIA_TICKS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
+    fn media_ticks() -> u32 {
+        MEDIA_TICKS.with(|t| t.get())
+    }
     impl App for Media {
         fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) {
             ui.fill(area, Color::hex(0x00ff00));
@@ -1495,7 +1502,7 @@ mod tests {
         }
         fn background_tick(&mut self, _sys: &mut dyn System) -> Option<u32> {
             self.bg_ticks += 1;
-            MEDIA_TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            MEDIA_TICKS.with(|t| t.set(t.get() + 1));
             Some(500)
         }
     }
@@ -1517,9 +1524,9 @@ mod tests {
         assert_eq!(r.d.running_app(), None);
         // Playing media keeps running in the background, at its own pace.
         assert_eq!(r.state_of("Media"), Some(AppState::Background));
-        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let before = media_ticks();
         r.idle(1600);
-        let ticks = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) - before;
+        let ticks = media_ticks() - before;
         assert!((2..=4).contains(&ticks), "{ticks} background ticks in 1.6 s at 500 ms");
     }
 
@@ -1544,15 +1551,15 @@ mod tests {
         r.sys.config_set(p4os_sdk::config::LOCK_ENABLED, "1");
         r.sys.config_set(p4os_sdk::config::LOCK_PIN, "any-hash");
         r.d.lock_now(&mut r.sys);
-        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let before = media_ticks();
         r.idle(1600);
-        assert!(MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) > before, "ticks while locked");
+        assert!(media_ticks() > before, "ticks while locked");
         assert_eq!(r.state_of("Media"), Some(AppState::Foreground));
         // Screen off: no frames at all, the step still runs it.
-        let before = MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        let before = media_ticks();
         r.sys.advance(600);
         assert_eq!(r.d.background_step(&mut r.sys).map(|ms| ms <= 500), Some(true));
-        assert!(MEDIA_TICKS.load(core::sync::atomic::Ordering::Relaxed) > before);
+        assert!(media_ticks() > before);
         assert!(!r.d.keep_awake());
     }
 
