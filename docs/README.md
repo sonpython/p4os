@@ -20,6 +20,12 @@ p4os has a preemptive scheduler running on both CPU cores, isolated user-mode ap
 | Storage | microSD (SDMMC, 4-bit) |
 | Audio | ES8311 codec over I2S, speaker amplifier |
 
+<p align="center">
+  <img src="images/board/jc4880p443c-front-back.webp" width="48%" alt="Guition JC4880P443C: front with the 4.3-inch touch screen, back with the ESP32-P4 module">
+  <img src="images/board/jc4880p443c-board-c6.webp" width="48%" alt="Guition JC4880P443C board with the ESP32-C6 Wi-Fi 6 / Bluetooth 5 co-processor">
+</p>
+<p align="center"><sub>Product images: Guition, from the <a href="https://vi.aliexpress.com/item/1005009618259341.html">JC4880P443C_I_W product listing</a>, used with the seller's permission.</sub></p>
+
 The board is the Guition JC4880P443C, not the Espressif EV board; pins and init sequences come from the vendor package and register dumps of the factory firmware.
 
 ## Features on `main`
