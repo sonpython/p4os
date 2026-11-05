@@ -114,8 +114,9 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-/// Headers the client writes itself.
-const RESERVED_HEADERS: [&str; 5] = ["host", "user-agent", "accept-encoding", "connection", "content-length"];
+/// Headers the client writes itself. User-Agent is not among them: a
+/// request may replace the default (APIs that check the client).
+const RESERVED_HEADERS: [&str; 4] = ["host", "accept-encoding", "connection", "content-length"];
 
 /// Largest body accepted, so a request always fits the socket send buffer.
 pub const MAX_BODY: usize = 2048;
@@ -149,7 +150,10 @@ impl Request {
 
     /// The request bytes for `url`. Call [`Request::validate`] first.
     pub fn encode(&self, url: &Url) -> Vec<u8> {
-        let mut head = format!("{} {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: p4os/0.1\r\n", self.method, url.path, url.host_header());
+        let mut head = format!("{} {} HTTP/1.0\r\nHost: {}\r\n", self.method, url.path, url.host_header());
+        if !self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("user-agent")) {
+            head.push_str("User-Agent: p4os/0.1\r\n");
+        }
         if !self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("accept")) {
             head.push_str("Accept: text/html,*/*\r\n");
         }
@@ -195,6 +199,58 @@ impl Response {
     }
 }
 
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+fn is_chunked(head: &str) -> bool {
+    header_value(head, "transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+}
+
+/// Decode a chunked body. Returns the data and the bytes consumed, or None
+/// while the final (zero-size) chunk has not arrived.
+fn dechunk(body: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut out = Vec::new();
+    let mut p = 0;
+    loop {
+        let line_end = p + body[p..].windows(2).position(|w| w == b"\r\n")?;
+        let size_text = core::str::from_utf8(&body[p..line_end]).ok()?;
+        let size = usize::from_str_radix(size_text.split(';').next()?.trim(), 16).ok()?;
+        p = line_end + 2;
+        if size == 0 {
+            // Optional trailers end with an empty line.
+            let end = p + body[p..].windows(2).position(|w| w == b"\r\n")?;
+            return Some((out, end + 2));
+        }
+        out.extend_from_slice(body.get(p..p + size)?);
+        p += size + 2;
+        if p > body.len() {
+            return None;
+        }
+    }
+}
+
+/// Length of the whole response if `raw` already holds all of it, judged by
+/// `Content-Length` or the last chunk. Servers that keep the connection open
+/// despite `Connection: close` (googlevideo does) are then not waited on.
+pub fn complete_len(raw: &[u8]) -> Option<usize> {
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = core::str::from_utf8(&raw[..split]).ok()?;
+    let status: u16 = head.split_whitespace().nth(1)?.parse().ok()?;
+    let body_at = split + 4;
+    if matches!(status, 204 | 304) || (100..200).contains(&status) {
+        return Some(body_at);
+    }
+    if is_chunked(head) {
+        return dechunk(&raw[body_at..]).map(|(_, used)| body_at + used);
+    }
+    let len: usize = header_value(head, "content-length")?.parse().ok()?;
+    (raw.len() >= body_at + len).then_some(body_at + len)
+}
+
 /// Parse a complete HTTP/1.x response (headers and body read to the end).
 pub fn parse_response(raw: &[u8]) -> Result<Response, String> {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("malformed HTTP response (no header end)")?;
@@ -209,18 +265,20 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, String> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or("malformed HTTP response (bad status code)")?;
-    let header = |name: &str| {
-        head.lines().skip(1).find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_string())
-        })
+    let header = |name: &str| header_value(&head, name).map(|v| v.to_string());
+    let raw_body = &raw[split + 4..];
+    let body = if is_chunked(&head) {
+        dechunk(raw_body).ok_or("truncated chunked HTTP body")?.0
+    } else {
+        match header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+            // Anything after the declared length (a keep-alive server's
+            // next bytes) is not part of this response.
+            Some(n) if raw_body.len() >= n => raw_body[..n].to_vec(),
+            Some(n) => return Err(format!("HTTP body cut short ({} of {n} bytes)", raw_body.len())),
+            None => raw_body.to_vec(),
+        }
     };
-    Ok(Response {
-        status,
-        location: header("location"),
-        content_type: header("content-type").unwrap_or_default(),
-        body: raw[split + 4..].to_vec(),
-    })
+    Ok(Response { status, location: header("location"), content_type: header("content-type").unwrap_or_default(), body })
 }
 
 #[cfg(test)]
@@ -229,6 +287,31 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn detects_complete_responses() {
+        let r = b"HTTP/1.1 206 Partial\r\nContent-Length: 3\r\nConnection: keep-alive\r\n\r\nabc";
+        assert_eq!(complete_len(r), Some(r.len()));
+        assert_eq!(complete_len(&r[..r.len() - 1]), None);
+        assert_eq!(parse_response(r).unwrap().body, b"abc");
+        assert!(parse_response(&r[..r.len() - 1]).is_err());
+        // No length: only the end of the connection completes it.
+        assert_eq!(complete_len(b"HTTP/1.0 200 OK\r\n\r\nabc"), None);
+        assert_eq!(complete_len(b"HTTP/1.1 304 Not Modified\r\n\r\n"), Some(29));
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
+        assert_eq!(complete_len(chunked), Some(chunked.len()));
+        assert_eq!(complete_len(&chunked[..chunked.len() - 2]), None);
+        assert_eq!(parse_response(chunked).unwrap().body, b"abcde");
+    }
+
+    #[test]
+    fn user_agent_can_be_replaced() {
+        let mut req = Request::get();
+        req.headers.push(("User-Agent".into(), "UA/1".into()));
+        req.validate().unwrap();
+        let bytes = String::from_utf8(req.encode(&Url::parse("https://h.com/").unwrap())).unwrap();
+        assert!(bytes.contains("User-Agent: UA/1\r\n") && !bytes.contains("p4os/0.1"));
     }
 
     #[test]

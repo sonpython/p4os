@@ -1,10 +1,9 @@
 //! The seam for video playback.
 //!
-//! The app opens every video through [`open`]. On-device playback (stream
-//! selection and decoding) does not exist yet, so the only implementation
-//! is [`Unavailable`], which offers the video as a QR code for a phone. A
-//! real player implements [`Player`] and is returned from [`open`]; nothing
-//! else in the app needs to change.
+//! The app opens every video through [`open`]. Videos play on the board
+//! with the `p4os-ytplay` engine ([`OnDevice`]); an id that engine cannot
+//! use falls back to [`Unavailable`], which offers the video as a QR code
+//! for a phone.
 
 use super::api::{watch_url, Video};
 use super::qr::Qr;
@@ -25,11 +24,58 @@ pub trait Player {
 
     /// The player is being closed: stop audio, free buffers.
     fn close(&mut self, _sys: &mut dyn System) {}
+
+    /// Keep playing while the screen is locked or off (see `App::background`).
+    fn background(&mut self, _sys: &mut dyn System) -> Option<u32> {
+        None
+    }
+
+    /// Video is playing: keep the screen on.
+    fn keep_awake(&self) -> bool {
+        false
+    }
 }
 
 /// Create the player for `video`.
 pub fn open(video: &Video) -> Box<dyn Player> {
-    Box::new(Unavailable::new(video))
+    match p4os_ytplay::player::parse_video_id(&video.id) {
+        Some(id) => Box::new(OnDevice { view: p4os_ytplay::app::PlayerView::default(), start: Some(id) }),
+        None => Box::new(Unavailable::new(video)),
+    }
+}
+
+/// Plays the video on the board (InnerTube streams, H.264 + Opus).
+pub struct OnDevice {
+    view: p4os_ytplay::app::PlayerView,
+    /// Video to start on the first update (opening needs the system).
+    start: Option<String>,
+}
+
+impl Player for OnDevice {
+    fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) {
+        if let Some(id) = self.start.take() {
+            self.view.open(&id, p4os_ytplay::app::DEFAULT_MODE, sys);
+        }
+        // The app's own Back button leaves the player; the view's landscape
+        // "Back" is the same request and needs no extra handling here.
+        let _ = self.view.update(ui, area, sys);
+    }
+
+    fn tick_interval_ms(&self) -> Option<u32> {
+        Some(self.view.tick_interval_ms())
+    }
+
+    fn close(&mut self, sys: &mut dyn System) {
+        self.view.close(sys);
+    }
+
+    fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+        self.view.background(sys)
+    }
+
+    fn keep_awake(&self) -> bool {
+        self.view.keep_awake()
+    }
 }
 
 /// Explains that playback is not available and shows the video's link.

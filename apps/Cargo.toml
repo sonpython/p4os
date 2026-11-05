@@ -8,6 +8,7 @@ description = "Desktop shell and built-in apps for p4os"
 [dependencies]
 p4os-sdk = { path = "../sdk" }
 p4os-media = { path = "../media" }
+p4os-ytplay = { path = "../ytplay" }
 libm = "0.2"
 qrcodegen-no-heap = "1.8"
 # Lock screen passcode hashing (PBKDF2-HMAC-SHA256) and constant-time compare.

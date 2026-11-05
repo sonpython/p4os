@@ -42,4 +42,5 @@ pub static APPS: &[AppInfo] = &[
     game2048::INFO,
     youtube::INFO,
     examples::INFO,
+    p4os_ytplay::app::INFO,
 ];

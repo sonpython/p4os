@@ -43,6 +43,7 @@ The board is the Guition JC4880P443C, not the Espressif EV board; pins and init 
 | GUI | Immediate-mode toolkit, anti-aliased fonts with Vietnamese, on-screen keyboard; **lock screen** with a PBKDF2-hashed passcode and attempt limiting |
 | Apps | Calculator, Files, Photos, Notes, Music, Browser, Terminal, Monitor, Settings, Clock, Paint, 2048, **YouTube** (Data API browsing, Google sign-in by device code; videos open on a phone through a QR code), and an Examples folder ([guide](app-development.md)) |
 | Tooling | Host simulator with scripted input and PNG screenshots; host unit tests; serial shell with diagnostics and benchmarks |
+| Video | YouTube playback on the board (YT Player): InnerTube lookup, ranged HTTPS fetches, H.264 144p/240p, Opus audio, A/V sync ([details](getting-started.md#youtube-trên-board-ytplay)) |
 
 ## Benchmarks against FreeRTOS
 

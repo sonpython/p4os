@@ -51,8 +51,10 @@ mod touch;
 mod trap;
 mod usermode;
 mod wdt;
+mod worker;
 mod wifi;
 mod wifi_auto;
+mod yt;
 
 use core::arch::asm;
 use core::panic::PanicInfo;

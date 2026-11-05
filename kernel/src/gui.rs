@@ -96,6 +96,9 @@ fn run(_: usize) {
             input.delta = Point::default();
             input.keys.clear();
         }
+        if desktop.keep_awake() {
+            last_input = now;
+        }
         let idle = now.saturating_sub(last_input);
         if power::off_after_ms().is_some_and(|t| idle >= t) {
             set_screen(&mut screen, Screen::Off, &mut sys, &mut desktop);
@@ -103,7 +106,9 @@ fn run(_: usize) {
             set_screen(&mut screen, Screen::Dim, &mut sys, &mut desktop);
         }
         if screen == Screen::Off {
-            sched::sleep_ms(power::touch_poll_off_ms());
+            // Media keeps playing with the screen off.
+            let wait = desktop.background(&mut sys).map_or(power::touch_poll_off_ms(), |ms| ms.min(power::touch_poll_off_ms()));
+            sched::sleep_ms(wait);
             continue;
         }
         sys.save_brightness_if_settled(now);
@@ -487,6 +492,9 @@ impl System for KernelSystem {
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         crate::rng::fill(buf);
         true
+    }
+    fn spawn_worker(&mut self, name: &'static str, core: Option<usize>, stack_size: usize, job: WorkerJob) -> Result<(), String> {
+        crate::worker::spawn(name, core, stack_size, job)
     }
 }
 
