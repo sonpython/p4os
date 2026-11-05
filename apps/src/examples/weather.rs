@@ -18,7 +18,7 @@ use alloc::string::{String, ToString};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, FetchId, FetchState, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "example-weather", name: "Weather", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "example-weather", name: "Weather", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(WeatherApp::default())
@@ -372,7 +372,7 @@ impl App for WeatherApp {
         matches!(self.load, Load::Waiting(_)).then_some(250)
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
+    fn on_stop(&mut self, sys: &mut dyn System) {
         // Leaving while a request is in flight: tell the OS to drop it.
         self.cancel(sys);
     }
@@ -481,7 +481,7 @@ mod tests {
         assert!(h.sys.net.requested[1].contains("latitude=51.51"));
 
         // Closing the app cancels the request still in flight.
-        app.on_close(&mut h.sys);
+        app.on_stop(&mut h.sys);
         assert_eq!(h.sys.net.cancelled, [1, 2]);
 
         // A stored value out of range falls back to the first city.

@@ -60,6 +60,8 @@ const MSTATUS_FS_CLEAN: u32 = 2 << 13;
 /// CLIC mirrors MPP/MPIE into mcause; `mret` uses the mcause copy.
 const MCAUSE_MPP_MASK: u32 = 3 << 28;
 const MCAUSE_MPIE: u32 = 1 << 27;
+/// Interrupt flag and cause code: the trap being serviced (see `trap.rs`).
+const MCAUSE_TRAP_ID: u32 = (1 << 31) | 0xFFF;
 
 /// PMP granule of the P4 HP core (ESP-IDF `SOC_CPU_PMP_REGION_GRANULARITY`).
 pub const REGION_ALIGN: usize = p4os_abi::REGION_ALIGN as usize;
@@ -184,6 +186,22 @@ impl UserApp {
 /// Apps by scheduler thread id. Each entry is written by its own thread
 /// (start and exit) and read by that thread or the trap handler running it.
 static APPS: [AtomicPtr<UserApp>; sched::MAX_THREADS] = [const { AtomicPtr::new(ptr::null_mut()) }; sched::MAX_THREADS];
+/// Kill requests by thread id, honoured the next time the app would
+/// resume in U-mode.
+static KILL: [AtomicBool; sched::MAX_THREADS] = [const { AtomicBool::new(false) }; sched::MAX_THREADS];
+
+/// Ask user app thread `id` to be killed. It dies on its next way back to
+/// U-mode: at once if it is running (the core is interrupted), after the
+/// syscall it is in otherwise (a sleep is cut short). Returns false if the
+/// thread runs no app.
+pub fn request_kill(id: usize) -> bool {
+    if APPS.get(id).is_none_or(|a| a.load(Ordering::Acquire).is_null()) {
+        return false;
+    }
+    KILL[id].store(true, Ordering::Release);
+    sched::interrupt(id);
+    true
+}
 
 fn current_app() -> Option<&'static mut UserApp> {
     let id = sched::current_id()?;
@@ -204,6 +222,7 @@ pub fn spawn(hart: usize, thread_name: &'static str, app: UserApp) -> (usize, Ar
 
 fn thread_main(raw: usize) {
     let id = sched::current_id().expect("user thread outside the scheduler");
+    KILL[id].store(false, Ordering::Relaxed);
     APPS[id].store(raw as *mut UserApp, Ordering::Release);
     unsafe { asm!("ecall", in("a7") call::ENTER_USER, options(noreturn)) };
 }
@@ -316,8 +335,9 @@ fn upcall(user: *mut TrapFrame, func: extern "C" fn() -> !) -> *mut TrapFrame {
 }
 
 /// Trap context, just before `mret`: when `resume` returns to U-mode,
-/// restrict this hart's PMP to the current app.
-pub fn before_resume(resume: &TrapFrame) {
+/// restrict this hart's PMP to the current app, or, if the app is to be
+/// killed, turn the frame into one that runs the kill path instead.
+pub fn before_resume(resume: &mut TrapFrame) {
     if !is_user_frame(resume) {
         return;
     }
@@ -325,6 +345,25 @@ pub fn before_resume(resume: &TrapFrame) {
         kprintln!("*** resuming U-mode without an app");
         crate::halt()
     };
+    let id = sched::current_id().unwrap_or(usize::MAX);
+    if KILL.get(id).is_some_and(|k| k.swap(false, Ordering::AcqRel)) {
+        kprintln!("*** app '{}' (thread {}) killed by the app supervisor", app.name, id);
+        // The user context is not needed any more: reuse its slot. The kill
+        // path's stack grows down from just below it, like an upcall.
+        let user = resume as *mut TrapFrame;
+        let (fs, trap_id) = (resume.mstatus & MSTATUS_FS_MASK, resume.mcause & MCAUSE_TRAP_ID);
+        let gp: u32;
+        unsafe {
+            asm!("mv {0}, gp", out(reg) gp);
+            user.write_bytes(0, 1);
+        }
+        resume.regs[1] = user as u32;
+        resume.regs[2] = gp;
+        resume.mepc = kill_entry as extern "C" fn() -> ! as usize as u32;
+        resume.mstatus = MSTATUS_MPP_M | MSTATUS_MPIE | fs;
+        resume.mcause = MCAUSE_MPP_MASK | MCAUSE_MPIE | trap_id;
+        return;
+    }
     let base = app.base();
     pmp::enter_app(base, base + app.rx_size, base + app.region.len());
 }

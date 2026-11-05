@@ -13,7 +13,7 @@ use libm::{atan2f, cosf, sinf, sqrtf};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DateTime, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "clock", name: "Clock", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "clock", name: "Clock", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Clock::default())

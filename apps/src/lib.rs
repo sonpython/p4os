@@ -7,6 +7,9 @@
 extern crate alloc;
 
 pub mod desktop;
+pub mod wm;
+#[cfg(test)]
+pub(crate) mod testsys;
 pub mod icons;
 pub mod lock;
 
@@ -41,6 +44,6 @@ pub static APPS: &[AppInfo] = &[
     paint::INFO,
     game2048::INFO,
     youtube::INFO,
-    examples::INFO,
     p4os_ytplay::app::INFO,
 ];
+

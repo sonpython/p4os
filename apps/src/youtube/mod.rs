@@ -40,7 +40,7 @@ use qr::Qr;
 use quota::Quota;
 use thumbs::Thumbs;
 
-pub const INFO: AppInfo = AppInfo { id: "youtube", name: "YouTube", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "youtube", name: "YouTube", icon, create, background: p4os_sdk::Capabilities::AUDIO };
 
 fn create() -> Box<dyn App> {
     Box::new(YouTube::new())
@@ -1351,7 +1351,7 @@ impl App for YouTube {
         }
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
+    fn on_stop(&mut self, sys: &mut dyn System) {
         for screen in &mut self.stack {
             if let Screen::Player(p) = screen {
                 p.close(sys);
@@ -1362,7 +1362,15 @@ impl App for YouTube {
         self.save_quota(sys, true);
     }
 
-    fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+    /// A playing video keeps the app running in the background.
+    fn background_work(&self) -> p4os_sdk::Capabilities {
+        match self.stack.last() {
+            Some(Screen::Player(p)) if p.playing() => p4os_sdk::Capabilities::AUDIO,
+            _ => p4os_sdk::Capabilities::NONE,
+        }
+    }
+
+    fn background_tick(&mut self, sys: &mut dyn System) -> Option<u32> {
         match self.stack.last_mut() {
             Some(Screen::Player(p)) => p.background(sys),
             _ => None,
@@ -1499,7 +1507,7 @@ mod tests {
         assert_eq!(ids, ["p4Os_Feed04", "p4Os_Feed01", "p4Os_Feed06", "p4Os_Feed02", "p4Os_Feed03", "p4Os_Feed05", "p4Os_Feed07"]);
         assert_eq!(app.home_feed.list.items[0].duration_s, Some(36 * 60 + 44));
         assert_eq!(app.client.quota.used(), 6);
-        app.on_close(&mut sys);
+        app.on_stop(&mut sys);
         assert_eq!(sys.config.get(config::YOUTUBE_QUOTA).map(String::as_str), Some("2026-10-28:6"));
     }
 
@@ -1577,7 +1585,7 @@ mod tests {
         app.apply(Action::OpenVideo(video), &mut sys);
         frame(&mut app, &mut sys);
         assert!(sys.net.unpolled() > 0, "detail and thumbnails are loading");
-        app.on_close(&mut sys);
+        app.on_stop(&mut sys);
         assert!(sys.net.cancelled >= 3);
         assert_eq!(sys.net.unpolled(), 0, "nothing is left behind in the OS");
     }

@@ -119,7 +119,11 @@ fn region_alloc(region: &Region, layout: &Layout) -> *mut u8 {
 /// allocator would send large blocks to PSRAM). Returns null when SRAM has
 /// no fitting block. Free with the global allocator (`alloc::alloc::dealloc`).
 pub fn alloc_sram(layout: Layout) -> *mut u8 {
-    region_alloc(&SRAM, &layout)
+    let p = region_alloc(&SRAM, &layout);
+    if !p.is_null() {
+        crate::memtag::charge(false, layout.size());
+    }
+    p
 }
 
 /// Allocate preferring SRAM, falling back to PSRAM.
@@ -130,17 +134,22 @@ fn alloc_sram_first(layout: &Layout) -> *mut u8 {
 
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.size() >= LARGE {
+        let p = if layout.size() >= LARGE {
             let p = region_alloc(&PSRAM, &layout);
             if p.is_null() { region_alloc(&SRAM, &layout) } else { p }
         } else {
             alloc_sram_first(&layout)
+        };
+        if !p.is_null() {
+            crate::memtag::charge(is_psram(p as usize), layout.size());
         }
+        p
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         check_thread_context();
         let Some(p) = NonNull::new(ptr) else { return };
+        crate::memtag::credit(is_psram(ptr as usize), layout.size());
         unsafe { region_of(ptr as usize).lock().free(p) };
     }
 }

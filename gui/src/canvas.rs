@@ -262,13 +262,18 @@ impl<'a> Canvas<'a> {
         if vis.is_empty() || w == 0 || h == 0 {
             return;
         }
+        // 16.16 fixed-point steps: no division per pixel (a 64-bit divide
+        // is a library call on RV32).
+        let step_x = ((w as u64) << 16) / dst.w as u64;
+        let x0 = (vis.x - dst.x) as u64 * step_x;
         for y in vis.y..vis.bottom() {
             let sy = ((y - dst.y) as i64 * h as i64 / dst.h as i64) as i32;
             let row = &img[(sy * w) as usize..((sy + 1) * w) as usize];
             let start = self.idx(vis.x, y);
-            for (i, p) in self.buf[start..start + vis.w as usize].iter_mut().enumerate() {
-                let sx = ((vis.x + i as i32 - dst.x) as i64 * w as i64 / dst.w as i64) as usize;
-                *p = row[sx];
+            let mut acc = x0;
+            for p in self.buf[start..start + vis.w as usize].iter_mut() {
+                *p = row[(acc >> 16) as usize];
+                acc += step_x;
             }
         }
     }
@@ -327,5 +332,29 @@ impl CeilI32 for f32 {
     fn ceil_i32(self) -> i32 {
         let t = self as i32;
         if (t as f32) < self { t + 1 } else { t }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blit_scaled_up_down_and_clipped() {
+        let img: alloc::vec::Vec<Color> = (0..6).map(|i| Color(i as u16)).collect(); // 3x2
+        let mut buf = alloc::vec![Color(99); 8 * 4];
+        let mut c = Canvas::new(&mut buf, 8, 4);
+        c.blit_scaled(Rect::new(0, 0, 6, 4), &img, 3, 2);
+        let row = |c: &Canvas, y: i32| (0..6).map(|x| c.get(x, y).0).collect::<alloc::vec::Vec<_>>();
+        assert_eq!(row(&c, 0), [0, 0, 1, 1, 2, 2]);
+        assert_eq!(row(&c, 3), [3, 3, 4, 4, 5, 5]);
+        assert_eq!(c.get(6, 0).0, 99);
+        // Downscale with a clip that cuts the left column.
+        let mut buf = alloc::vec![Color(99); 4];
+        let mut c = Canvas::new(&mut buf, 4, 1);
+        c.set_clip(Rect::new(1, 0, 3, 1));
+        let wide: alloc::vec::Vec<Color> = (0..8).map(|i| Color(i as u16)).collect(); // 8x1
+        c.blit_scaled(Rect::new(0, 0, 4, 1), &wide, 8, 1);
+        assert_eq!([c.get(0, 0).0, c.get(1, 0).0, c.get(2, 0).0, c.get(3, 0).0], [99, 2, 4, 6]);
     }
 }

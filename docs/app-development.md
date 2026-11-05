@@ -3,7 +3,7 @@
 > **Tóm tắt (tiếng Việt).** p4os có hai loại app.
 > **App tích hợp** (tin cậy) là crate Rust trong `apps/`, được link vào kernel, vẽ bằng bộ widget immediate-mode và dùng dịch vụ hệ thống qua trait `System` (file trên SD, cài đặt lưu trong flash, HTTP/HTTPS, đồng hồ, âm thanh, xoay màn hình). Chúng được test trên máy host và chụp màn hình bằng simulator.
 > **App user** (không tin cậy) là binary riêng chạy ở U-mode trên core 1, bị PMP cách ly. Chúng chỉ có 6 syscall (in ra console, ngủ, đọc thời gian, yield, getpid, exit), không có GUI, được nạp vào slot flash bằng `scripts/flash-app.sh` và chạy bằng lệnh shell `run SLOT`.
-> Bốn app mẫu: `apps/src/examples/` (Hello Counter, Lap Timer, Weather, mở từ biểu tượng **Examples**) và `userapps/ticker/`. Phần cuối có bảng tra cứu API và các API sắp có.
+> Bốn app mẫu: `apps/src/examples/` (Hello Counter, Lap Timer, Weather, trên trang **Examples** của màn hình chính) và `userapps/ticker/`. Phần cuối có bảng tra cứu API và các API sắp có.
 
 This guide shows how to write apps for p4os. It is based on the code on `main`; file paths are relative to the repository root.
 
@@ -30,11 +30,11 @@ Most apps today are built-in apps. User-mode apps are the start of a safe app mo
 
 ## Run the examples
 
-The examples are in [`apps/src/examples/`](../apps/src/examples/) and open from the **Examples** icon on the home screen:
+The examples are in [`apps/src/examples/`](../apps/src/examples/) and have their own **Examples** page, the last page of the home screen (swipe left):
 
-<a href="media/p4os-demo.mp4"><img src="media/p4os-demo-preview.gif" width="200" alt="p4os on the board; the Examples folder appears at the end of the demo"></a>
+<a href="media/p4os-demo.mp4"><img src="media/p4os-demo-preview.gif" width="200" alt="p4os on the board"></a>
 
-The demo video ends in the Examples folder. To see each example on your own machine, render it with the simulator script below.
+The demo video was recorded before the examples moved from a folder icon to their own page. To see each example on your own machine, render it with the simulator script below.
 
 | Example | Shows |
 |---|---|
@@ -43,12 +43,12 @@ The demo video ends in the Examples folder. To see each example on your own mach
 | [`weather.rs`](../apps/src/examples/weather.rs) | HTTPS fetch and poll, error handling, reading JSON, remembering a choice |
 | [`userapps/ticker`](../userapps/ticker/src/main.rs) | A user-mode app using every syscall, including an error return |
 
-The examples sit behind one launcher icon, not one icon each, so that they build and are tested with the rest of the workspace (no feature flag to forget) without crowding the home screen. The folder is itself an app ([`examples/mod.rs`](../apps/src/examples/mod.rs)) that hosts the example you pick. Adding an example takes one entry in its `EXAMPLES` list.
+The examples are a launcher group rather than entries of `APPS`, so they build and are tested with the rest of the workspace (no feature flag to forget) without crowding the main pages. `Desktop::new()` registers the `EXAMPLES` list of [`examples/mod.rs`](../apps/src/examples/mod.rs) as the "Examples" group, which the launcher shows on a page of its own. Adding an example takes one entry in that list.
 
 Run them in the simulator (on an aarch64 Linux host; see [Simulator](#simulator) for other hosts):
 
 ```sh
-cargo sim "launch examples; shot /tmp/folder.png; tap 240 204; shot /tmp/hello.png"
+cargo sim "launch example-hello; tap 388 676; shot /tmp/hello.png"
 ```
 
 ## Built-in apps
@@ -61,10 +61,11 @@ An app is a type that implements `App`, plus a constant `AppInfo` that tells the
 use alloc::boxed::Box;
 use alloc::format;
 use p4os_sdk::gui::ui::{Align, Key};
-use p4os_sdk::{App, AppInfo, Canvas, Color, Rect, System, Ui};
+use p4os_sdk::{App, AppInfo, Canvas, Capabilities, Color, Rect, System, Ui};
 
-/// What the launcher (here: the Examples folder) needs to know.
-pub const INFO: AppInfo = AppInfo { id: "example-hello", name: "Hello Counter", icon, create };
+/// What the launcher (here: the Examples page) needs to know.
+pub const INFO: AppInfo =
+    AppInfo { id: "example-hello", name: "Hello Counter", icon, create, background: Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Hello::default())
@@ -102,14 +103,36 @@ pub trait App {
         None
     }
 
-    /// Called when the user leaves the app; release audio, etc.
-    fn on_close(&mut self, _sys: &mut dyn System) {}
+    /// System Back / Forward gesture; return false at the app's root
+    /// (Back then goes to the home screen).
+    fn on_back(&mut self, _sys: &mut dyn System) -> bool { false }
+    fn on_forward(&mut self, _sys: &mut dyn System) -> bool { false }
+
+    /// Lifecycle: left the foreground, back in it, memory is short, about
+    /// to be destroyed.
+    fn on_pause(&mut self, _sys: &mut dyn System) {}
+    fn on_resume(&mut self, _sys: &mut dyn System) {}
+    fn on_low_memory(&mut self, _sys: &mut dyn System) {}
+    fn on_stop(&mut self, _sys: &mut dyn System) {}
+
+    /// Background work needed right now, limited to `AppInfo::background`,
+    /// and the periodic call that does it while the app is off screen.
+    fn background_work(&self) -> Capabilities { Capabilities::NONE }
+    /// Returns how soon to be called again; `None` uses tick_interval_ms.
+    fn background_tick(&mut self, _sys: &mut dyn System) -> Option<u32> { None }
+
+    /// Video: take the whole screen (no status, title or home bar; the
+    /// gestures still work), and keep the screen from turning off.
+    fn fullscreen(&self) -> bool { false }
+    fn keep_awake(&self) -> bool { false }
 }
 ```
 
+All methods except `update` have default bodies, so an app implements only what it needs.
+
 ### The frame loop
 
-The desktop ([`apps/src/desktop.rs`](../apps/src/desktop.rs)) owns the screen. It draws the status bar and a title bar with a **Home** button, and gives the rest of the screen to the running app as `area`. A frame is drawn:
+The desktop ([`apps/src/desktop.rs`](../apps/src/desktop.rs)) owns the screen. It draws the status bar, a title bar with a **Home** button and the home bar at the bottom (the bottom gesture zone), and gives the rest of the screen to the foreground app as `area`. A frame is drawn:
 
 - when there is input (touch or a key);
 - when the interval returned by `tick_interval_ms` has passed;
@@ -118,7 +141,9 @@ The desktop ([`apps/src/desktop.rs`](../apps/src/desktop.rs)) owns the screen. I
 
 Each frame, `update` must draw the whole app: there is no retained widget tree. On the board `update` runs on the kernel's `gui` thread (priority 3, 48 KiB stack), and nothing else is drawn or handles touch while it runs. So `update` must return quickly; see [No blocking in a frame](#no-blocking-in-a-frame).
 
-`update` is never called concurrently with itself. The app object is created when the user opens the app and dropped when they leave (Home button or Escape key) after `on_close`. State that must outlive that goes into [settings](#settings) or a [file](#files).
+`update` is never called concurrently with itself. The app object is created when the user opens the app. When the user leaves (Home button, the Home swipe or the app switcher) it is **not** dropped: it gets `on_pause` and stays in memory, suspended (no calls at all), or in the background if `background_work` asks for a capability the app declared in `AppInfo::background` (`AUDIO` keeps Music advancing its playlist, `NETWORK` lets the Browser finish a page load). Background apps get `background_tick` instead of `update`, paced by `tick_interval_ms` and limited to 10 % of a core. Returning to the app calls `on_resume`. The app is destroyed (`on_stop`, then dropped) when the user closes it in the app switcher or in Monitor > Apps, or when the system needs the memory or more than 6 apps are open. A paused app may be stopped without another call, so save anything the user would hate to lose in `on_pause`; other state goes into [settings](#settings) or a [file](#files).
+
+The system gestures are handled before the app sees input: a swipe in from the left edge calls `on_back` (return `true` if you went back a step, `false` at your root to go home), from the right edge `on_forward`. Touches that start in the 24 px edge zones are held back until the desktop knows they are not a gesture, then replayed to the app; the rest of the screen is unaffected.
 
 ### Layout
 
@@ -340,8 +365,8 @@ The pattern from `weather.rs`: start the request, poll it every frame, tick only
         matches!(self.load, Load::Waiting(_)).then_some(250)
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
-        // Leaving while a request is in flight: tell the OS to drop it.
+    fn on_stop(&mut self, sys: &mut dyn System) {
+        // Closed while a request is in flight: tell the OS to drop it.
         self.cancel(sys);
     }
 ```
@@ -352,7 +377,7 @@ The YouTube app ([`apps/src/youtube/`](../apps/src/youtube/mod.rs)) shows the re
 
 #### Audio
 
-`sys.audio().play(source)` plays a `Box<dyn AudioSource>` on the OS audio thread: implement `sample_rate()` and `fill(&mut [i16])` with interleaved stereo samples, returning 0 at the end. `pause`, `stop`, `state`, `position_frames`, `set_volume` control playback. Audio keeps playing when your app is closed unless you stop it in `on_close`. See [`apps/src/music.rs`](../apps/src/music.rs), which decodes MP3 and WAV with `p4os-media`. (The board's speaker output works electrically but no speaker is fitted on the test board.)
+`sys.audio().play(source)` plays a `Box<dyn AudioSource>` on the OS audio thread: implement `sample_rate()` and `fill(&mut [i16])` with interleaved stereo samples, returning 0 at the end. `pause`, `stop`, `state`, `position_frames`, `set_volume` control playback. Audio keeps playing when your app is closed unless you stop it in `on_stop`; to keep feeding it while the app is in the background, declare `background: Capabilities::AUDIO` and return it from `background_work` while playing. See [`apps/src/music.rs`](../apps/src/music.rs), which decodes MP3 and WAV with `p4os-media`. (The board's speaker output works electrically but no speaker is fitted on the test board.)
 
 #### Other services
 
@@ -369,11 +394,11 @@ The YouTube app ([`apps/src/youtube/`](../apps/src/youtube/mod.rs)) shows the re
 
 ### Register the app
 
-Add the module to [`apps/src/lib.rs`](../apps/src/lib.rs) and its `INFO` to `APPS`. The launcher shows apps in that order:
+Add the module to [`apps/src/lib.rs`](../apps/src/lib.rs) and its `INFO` to `APPS`. The launcher shows apps in that order, as many pages of its icon grid as needed (3 x 4 in portrait, 5 x 2 in landscape):
 
 ```rust
 pub mod game2048;
-pub mod examples;
+pub mod youtube;
 ```
 
 ```rust
@@ -381,11 +406,11 @@ pub static APPS: &[AppInfo] = &[
     calculator::INFO,
     // ...
     game2048::INFO,
-    examples::INFO,
+    youtube::INFO,
 ];
 ```
 
-Ids must be unique; the launcher, the simulator's `launch` command and `sys.launch` use them. For a demo or experiment, add it to `EXAMPLES` in [`apps/src/examples/mod.rs`](../apps/src/examples/mod.rs) instead, so it appears inside the Examples folder.
+Ids must be unique; the launcher, the simulator's `launch` command and `sys.launch` use them. For a demo or experiment, add it to `EXAMPLES` in [`apps/src/examples/mod.rs`](../apps/src/examples/mod.rs) instead, so it appears on the Examples page. Other groups work the same way: `Desktop::register_group("Group name", &LIST)` (or `register_app(group, &INFO)`) puts them on pages of their own, titled with the group name.
 
 ### Test on the host
 
@@ -446,7 +471,7 @@ Commands go on the command line separated by `;`, or one per line in a file pass
 
 ```sh
 # on an aarch64 Linux host (the `cargo sim` alias in .cargo/config.toml)
-cargo sim "launch examples; tap 240 204; tap 388 728; tap 388 728; shot /tmp/hello.png"
+cargo sim "launch example-hello; tap 388 676; tap 388 676; shot /tmp/hello.png"
 # on any other host, name its target instead of the board's
 cargo run --release -p p4os-sim --target x86_64-unknown-linux-gnu -- "launch calculator; shot /tmp/calc.png"
 ```
@@ -659,7 +684,7 @@ Interrupt levels 1 to 3 are kernel levels: their handlers may take spinlocks and
 - Check `is_up()` first and tell the user how to fix it ("Join a Wi-Fi network in Settings").
 - Handle all three outcomes: `Failed(message)` (DNS, TLS, timeout), `Done` with a status other than 200, and a 200 whose body is not what you expected.
 - Offer a Retry button rather than retrying in a loop.
-- Keep one request per purpose in flight, and `cancel` the ones you no longer need (a new choice, `on_close`): the OS holds each result until it is polled once or cancelled.
+- Keep one request per purpose in flight, and `cancel` the ones you no longer need (a new choice, `on_stop`): the OS holds each result until it is polled once or cancelled.
 
 ### Keep secrets out of logs
 
@@ -679,9 +704,16 @@ The `p4os-sdk` traits, from [`sdk/src/lib.rs`](../sdk/src/lib.rs). Methods with 
 |---|---|
 | `fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System)` | Draw and handle input for one frame |
 | `fn tick_interval_ms(&self) -> Option<u32>` | Redraw interval without input; default `None` |
-| `fn on_close(&mut self, sys: &mut dyn System)` | The user left the app; default does nothing |
+| `fn on_back(&mut self, sys) -> bool` / `on_forward` | Back / Forward gesture; `false` = not handled (Back then goes home) |
+| `fn on_pause(&mut self, sys)` / `on_resume` | Left / returned to the foreground |
+| `fn on_low_memory(&mut self, sys)` | Drop caches that can be rebuilt |
+| `fn on_stop(&mut self, sys)` | About to be destroyed; release audio, cancel requests, save |
+| `fn background_work(&self) -> Capabilities` | Background capabilities needed now (only declared ones are granted) |
+| `fn background_tick(&mut self, sys) -> Option<u32>` | Periodic work while not drawn: in the background, or in the foreground while the screen is locked or off; returns the next delay (`None`: `tick_interval_ms`) |
+| `fn fullscreen(&self) -> bool` | Take the whole screen (video); gestures, Escape and `sys.launch("")` still lead home |
+| `fn keep_awake(&self) -> bool` | Keep the screen on (video playing) |
 
-`AppInfo { id: &'static str, name: &'static str, icon: fn(&mut Canvas, Rect), create: fn() -> Box<dyn App> }`
+`AppInfo { id: &'static str, name: &'static str, icon: fn(&mut Canvas, Rect), create: fn() -> Box<dyn App>, background: Capabilities }`, with `Capabilities::NONE`, `AUDIO` or `NETWORK`.
 
 ### `System`
 
@@ -757,7 +789,5 @@ The `p4os-sdk` traits, from [`sdk/src/lib.rs`](../sdk/src/lib.rs). Methods with 
 
 These are being built on branches that are not merged yet. They are **not available** on `main`; do not rely on their names or signatures until they land.
 
-- **Gesture navigation and app lifecycle**: system Back/Forward gestures and lifecycle callbacks on `App` (for example being sent to the background and resumed) instead of only `on_close`.
-- **Home screen pages and app groups**: a fixed icon grid per page with swiping between pages and page dots, and a way to register groups of apps with the desktop. The Examples folder will then become such a group; until then it is the folder app described above.
 - **Power management**: screen-off and wake events (the lock screen already has hooks for them).
 - **More for user-mode apps**: drawing, files and a heap are not designed yet.

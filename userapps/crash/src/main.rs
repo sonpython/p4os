@@ -14,6 +14,7 @@
 //! | 7   | load from the interrupt controller (CLIC) | stalls core 1, see below |
 //! | 8   | load from the cache controller            | load fault      |
 //! | 9   | load from the mask ROM                    | load fault      |
+//! | 10  | spin forever (CPU budget, not isolation)  | throttled, then killed by appmon |
 //!
 //! Apps run on core 1, whose PMP the bootloader leaves unlocked (shell
 //! `pmp`). Tests 8 and 9 only fault there. Test 7 shows a hardware limit: a
@@ -67,6 +68,11 @@ fn main(arg: u32) -> i32 {
             7 => println!("read {:#x}", (CLIC_BASE as *const u32).read_volatile()),
             8 => println!("read {:#x}", (CACHE_CTRL as *const u32).read_volatile()),
             9 => println!("read {:#x}", (ROM as *const u32).read_volatile()),
+            // Not an isolation test: spin forever so the kernel's CPU
+            // budget throttles and finally kills the app.
+            10 => loop {
+                core::hint::spin_loop();
+            },
             _ => {
                 println!("unknown test");
                 return 2;

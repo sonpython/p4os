@@ -7,7 +7,7 @@ use alloc::string::{String, ToString};
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "calculator", name: "Calculator", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "calculator", name: "Calculator", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Calculator::default())

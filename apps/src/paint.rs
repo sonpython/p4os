@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use p4os_sdk::gui::ui::Align;
 use p4os_sdk::{App, AppInfo, Canvas, Color, DirEntry, Point, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "paint", name: "Paint", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "paint", name: "Paint", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 const SAVE_DIR: &str = "/sd/Paint";
 const PAPER: Color = Color::WHITE;

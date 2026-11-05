@@ -1,0 +1,55 @@
+# Simulator script for the navigation screenshots (docs/screenshots/nav-*.png).
+# Run from the repository root:
+#   cargo sim -- --script docs/screenshots/nav-shots.txt
+launch music
+wait 300
+tap 240 395
+wait 300
+launch photos
+wait 1500
+launch browser
+wait 300
+launch files
+tap 200 200
+wait 200
+launch calculator
+tap 60 520
+tap 180 520
+tap 410 520
+tap 300 615
+tap 410 710
+shot docs/screenshots/nav-home-indicator.png
+down 240 797
+move 240 610 160
+shot docs/screenshots/nav-home-swipe.png
+up
+wait 400
+launch monitor
+tap 330 128
+wait 1200
+shot docs/screenshots/nav-task-manager.png
+swipe 240 797 240 560 200 hold
+wait 300
+shot docs/screenshots/nav-switcher.png
+swipe 3 400 200 400 150
+wait 200
+launch files
+down 3 420
+move 115 425 160
+shot docs/screenshots/nav-back-gesture.png
+up
+wait 300
+swipe 240 797 240 600 150
+wait 400
+rotate
+wait 300
+shot docs/screenshots/nav-home-page-1.png
+down 640 250
+move 330 255 200
+shot docs/screenshots/nav-home-page-swipe.png
+up
+wait 400
+shot docs/screenshots/nav-home-page-2.png
+swipe 400 477 400 300 200 hold
+wait 300
+shot docs/screenshots/nav-switcher-landscape.png

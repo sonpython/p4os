@@ -27,6 +27,9 @@ pub struct Input {
     /// Pointer movement since the previous frame while touching.
     pub delta: Point,
     pub keys: Vec<Key>,
+    /// Fingers on the panel while `down`; 0 when the source cannot tell
+    /// (treated as one).
+    pub fingers: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

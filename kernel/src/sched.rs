@@ -23,7 +23,7 @@ use crate::irq::{self, HART_COUNT};
 use crate::spin::SpinLock;
 use crate::{smp, time};
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub const MAX_THREADS: usize = 16;
 pub const PRIORITY_IDLE: u8 = 0;
@@ -119,6 +119,8 @@ static ONLINE: [AtomicBool; HART_COUNT] = [const { AtomicBool::new(false) }; HAR
 static NEED_RESCHED: [AtomicBool; HART_COUNT] = [const { AtomicBool::new(false) }; HART_COUNT];
 static IDLE_TICKS: [AtomicU32; HART_COUNT] = [const { AtomicU32::new(0) }; HART_COUNT];
 static LOAD_PERMILLE: [AtomicU32; HART_COUNT] = [const { AtomicU32::new(0) }; HART_COUNT];
+/// Thread each core runs, readable without the lock (`usize::MAX`: none).
+static RUNNING: [AtomicUsize; HART_COUNT] = [const { AtomicUsize::new(usize::MAX) }; HART_COUNT];
 
 /// Create a thread that runs `entry(arg)` on any core.
 pub fn spawn(name: &'static str, priority: u8, stack_size: usize, entry: fn(usize), arg: usize) -> usize {
@@ -165,6 +167,7 @@ pub fn spawn_on(
         let mut s = SCHED.lock();
         reap_exited(&mut s, &mut dead);
         let slot = s.threads.iter().position(Option::is_none).expect("thread table full");
+        crate::memtag::reset_thread(slot);
         NOTIFY_PENDING[slot].store(0, Ordering::Relaxed);
         NOTIFY_WAITING[slot].store(0, Ordering::Relaxed);
         s.threads[slot] = Some(Thread {
@@ -211,6 +214,51 @@ extern "C" fn thread_trampoline(entry: usize, arg: usize) -> ! {
 /// started there.
 pub fn current_id() -> Option<usize> {
     SCHED.lock().current[irq::hart_id()]
+}
+
+/// Thread running on core `hart`, without taking the scheduler lock (for
+/// the heap's owner tags). Only exact when read with interrupts masked on
+/// that core.
+#[inline]
+pub fn running_id(hart: usize) -> Option<usize> {
+    let id = RUNNING[hart].load(Ordering::Relaxed);
+    (id != usize::MAX).then_some(id)
+}
+
+/// CPU time (ticks of 1 ms) thread `id` has run, if it exists.
+pub fn run_ticks(id: usize) -> Option<u32> {
+    SCHED.lock().threads.get(id)?.as_ref().map(|t| t.run_ticks)
+}
+
+/// Keep thread `id` off the CPU until tick `until` (CPU budget
+/// enforcement). Affects only a runnable thread; returns whether it did.
+/// A thread inside a blocking call is left alone, so it cannot lose a
+/// wake-up.
+pub fn hold_until(id: usize, until: u32) -> bool {
+    let mut s = SCHED.lock();
+    let Some(t) = s.threads.get(id).and_then(Option::as_ref) else { return false };
+    if t.state != State::Ready {
+        return false;
+    }
+    let on_cpu = t.on_cpu;
+    s.set_state(id, State::Sleeping { until });
+    if let Some(cpu) = on_cpu {
+        resched(cpu);
+    }
+    true
+}
+
+/// Make thread `id` notice a request soon: end a sleep early and make the
+/// core running it trap (and so pass through the trap exit path).
+pub fn interrupt(id: usize) {
+    let mut guard = SCHED.lock();
+    let s = &mut *guard;
+    let Some(t) = s.threads.get(id).and_then(Option::as_ref) else { return };
+    match (t.state, t.on_cpu) {
+        (State::Sleeping { .. }, _) => make_ready(s, id),
+        (_, Some(cpu)) => resched(cpu),
+        _ => {}
+    }
 }
 
 /// End the calling thread (as if its entry function had returned).
@@ -604,6 +652,7 @@ pub fn switch(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     let next = pick_next(s, hart);
     s.current[hart] = Some(next);
+    RUNNING[hart].store(next, Ordering::Relaxed);
     if prev != Some(next) {
         if let Some(cur) = prev {
             let t = s.threads[cur].as_mut().unwrap();

@@ -113,6 +113,26 @@ impl System for HostSystem {
         self.config.insert(key.into(), value.into());
     }
 
+    fn uptime_us(&self) -> u64 {
+        self.start.elapsed().as_micros() as u64
+    }
+
+    fn log(&mut self, msg: &str) {
+        eprintln!("{msg}");
+    }
+
+    fn set_heap_owner(&mut self, owner: u8) -> u8 {
+        crate::memtag::set_owner(owner)
+    }
+
+    fn heap_owner_usage(&self, owner: u8) -> (usize, usize) {
+        crate::memtag::usage(owner)
+    }
+
+    fn clear_heap_owner(&mut self, owner: u8) {
+        crate::memtag::clear(owner)
+    }
+
     fn fill_random(&mut self, buf: &mut [u8]) -> bool {
         std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf)).is_ok()
     }

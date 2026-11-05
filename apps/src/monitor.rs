@@ -1,5 +1,7 @@
 //! System monitor: uptime, CPU load history, memory usage and the kernel
-//! thread table, refreshed once a second from [`System::stats`].
+//! thread table, refreshed once a second from [`System::stats`], and a task
+//! manager listing running apps with their CPU and memory use and a Close
+//! button ([`System::running_apps`]).
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -7,9 +9,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use p4os_sdk::gui::ui::Align;
-use p4os_sdk::{App, AppInfo, Canvas, Color, Point, Rect, System, SystemStats, Ui};
+use p4os_sdk::{App, AppInfo, AppState, AppUsage, Canvas, Color, Point, Rect, System, SystemStats, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "monitor", name: "Monitor", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "monitor", name: "Monitor", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 /// Samples kept for the load graph (one per second).
 const HISTORY_LEN: usize = 60;
@@ -57,23 +59,57 @@ impl LoadHistory {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    System,
+    Apps,
+}
+
 struct Monitor {
+    tab: Tab,
     stats: SystemStats,
+    apps: Vec<AppUsage>,
     history: LoadHistory,
     /// Uptime of the last sample; `None` before the first one.
     last_sample: Option<u64>,
     table_offset: i32,
+    apps_offset: i32,
 }
 
 impl Default for Monitor {
     fn default() -> Self {
         Self {
+            tab: Tab::System,
             stats: SystemStats::default(),
+            apps: Vec::new(),
             history: LoadHistory::new(HISTORY_LEN),
             last_sample: None,
             table_offset: 0,
+            apps_offset: 0,
         }
     }
+}
+
+const TAB_H: i32 = 48;
+const APP_ROW_H: i32 = 68;
+
+fn state_text(a: &AppUsage) -> String {
+    let state = match a.state {
+        AppState::Foreground => "Foreground",
+        AppState::Background => "Background",
+        AppState::Suspended => "Suspended",
+        AppState::Stopped => "Stopped",
+    };
+    let kind = if matches!(a.handle, p4os_sdk::AppHandle::User(_)) { ", isolated" } else { "" };
+    let mut s = if a.note.is_empty() { format!("{state}{kind}") } else { format!("{state}{kind} ({})", a.note) };
+    if a.frame_us > 0 {
+        s.push_str(&format!(", frame {:.1} ms", a.frame_us as f32 / 1000.0));
+    }
+    s
+}
+
+fn fmt_cpu(permille: u16) -> String {
+    format!("{}.{}%", permille / 10, permille % 10)
 }
 
 /// The kernel reports per-thread data whenever it measures load, so an
@@ -149,6 +185,7 @@ impl Monitor {
         }
         self.last_sample = Some(now);
         self.stats = sys.stats();
+        self.apps = sys.running_apps();
         if has_load(&self.stats) {
             self.history.push(self.stats.cpu_load);
         }
@@ -302,6 +339,83 @@ impl Monitor {
     }
 }
 
+impl Monitor {
+    /// Segmented control choosing between the system view and the apps.
+    fn tabs(&mut self, ui: &mut Ui, r: Rect) {
+        let t = *ui.theme;
+        ui.canvas.fill_round_rect(r, r.h / 2, t.surface);
+        for (i, (tab, label)) in [(Tab::System, "System"), (Tab::Apps, "Apps")].into_iter().enumerate() {
+            let cell = Rect::new(r.x + i as i32 * r.w / 2, r.y, r.w / 2, r.h).inset(4);
+            let (_, clicked) = ui.interact(cell);
+            let selected = self.tab == tab;
+            if selected {
+                ui.canvas.fill_round_rect(cell, cell.h / 2, t.accent);
+            }
+            let f = ui.fonts.body;
+            ui.text(cell, label, &f, if selected { t.accent_text } else { t.text_dim }, Align::Center);
+            if clicked {
+                self.tab = tab;
+            }
+        }
+    }
+
+    /// Task manager: one row per running app.
+    fn draw_apps(&mut self, ui: &mut Ui, r: Rect, sys: &mut dyn System) {
+        let t = *ui.theme;
+        ui.panel(r);
+        let inner = r.inset(14);
+        let (head, list) = inner.split_top(30);
+        let (body, small) = (ui.fonts.body, ui.fonts.small);
+        // Name | CPU | SRAM | PSRAM | Close; the numbers need room for
+        // "1023.9 KB" in the small font.
+        let close_w = 84;
+        let widths = [0, 56, 80, 80];
+        let name_w = inner.w - close_w - widths.iter().sum::<i32>();
+        let col_x = [0, name_w, name_w + widths[1], name_w + widths[1] + widths[2]];
+        let col_w = |i: usize| if i == 0 { name_w - 8 } else { widths[i] - 8 };
+        for (i, title) in ["App", "CPU", "SRAM", "PSRAM"].iter().enumerate() {
+            let align = if i == 0 { Align::Left } else { Align::Right };
+            ui.text(Rect::new(head.x + col_x[i], head.y, col_w(i), head.h), title, &small, t.text_dim, align);
+        }
+        ui.canvas.fill_rect(Rect::new(head.x, head.bottom() - 1, head.w, 1), t.border);
+        if self.apps.is_empty() {
+            ui.text(list, "No apps running", &body, t.text_dim, Align::Center);
+            return;
+        }
+        let content_h = self.apps.len() as i32 * APP_ROW_H;
+        let off = ui.scroll(list, content_h, &mut self.apps_offset);
+        let old = ui.canvas.set_clip(list.intersect(&ui.canvas.clip()));
+        let mut close = None;
+        for (i, a) in self.apps.iter().enumerate() {
+            let y = list.y + i as i32 * APP_ROW_H - off;
+            if y + APP_ROW_H < list.y || y > list.bottom() {
+                continue;
+            }
+            let row = Rect::new(list.x, y, list.w, APP_ROW_H);
+            ui.text(Rect::new(row.x, y + 8, col_w(0), 28), &a.name, &body, t.text, Align::Left);
+            ui.text(Rect::new(row.x, y + 36, col_w(0), 24), &state_text(a), &small, t.text_dim, Align::Left);
+            let vals = [fmt_cpu(a.cpu_permille), fmt_bytes(a.sram), fmt_bytes(a.psram)];
+            for (k, v) in vals.iter().enumerate() {
+                let cell = Rect::new(row.x + col_x[k + 1], y, col_w(k + 1), APP_ROW_H);
+                ui.text(cell, v, &small, t.text, Align::Right);
+            }
+            let btn = Rect::new(row.right() - close_w + 6, y + 12, close_w - 6, APP_ROW_H - 24);
+            if ui.button_colored(btn, "Close", t.danger.darken(60), Color::WHITE) {
+                close = Some(a.handle);
+            }
+            if i + 1 < self.apps.len() {
+                ui.canvas.fill_rect(Rect::new(row.x, y + APP_ROW_H - 1, row.w, 1), t.border);
+            }
+        }
+        ui.canvas.restore_clip(old);
+        if let Some(h) = close {
+            sys.close_app(h);
+            // Refresh at the next frame so the row disappears.
+            self.last_sample = None;
+        }
+    }
+}
+
 impl App for Monitor {
     fn update(&mut self, ui: &mut Ui, area: Rect, sys: &mut dyn System) {
         self.sample(sys);
@@ -309,6 +423,19 @@ impl App for Monitor {
         ui.fill(area, t.bg);
         let area = area.inset(12);
         let gap = 12;
+        let (tabs, area) = area.split_top(TAB_H);
+        let tab_w = tabs.w.min(360);
+        self.tabs(ui, Rect::new(tabs.x + (tabs.w - tab_w) / 2, tabs.y, tab_w, tabs.h));
+        let area = Rect::new(area.x, area.y + gap, area.w, area.h - gap);
+        if self.tab == Tab::Apps {
+            let total = self.apps.iter().map(|a| a.sram + a.psram).sum::<usize>();
+            let (sum, list) = area.split_top(30);
+            let f = ui.fonts.small;
+            let line = format!("{} running, {} attributed to apps", self.apps.len(), fmt_bytes(total));
+            ui.text(sum, &line, &f, t.text_dim, Align::Left);
+            self.draw_apps(ui, Rect::new(list.x, list.y + 6, list.w, list.h - 6), sys);
+            return;
+        }
 
         let portrait = area.h > area.w;
 
@@ -401,6 +528,30 @@ mod tests {
         assert_eq!(fmt_bytes(32 * 1024 * 1024), "32.0 MB");
         assert_eq!(fmt_usage(10, 0), DASH);
         assert_eq!(fmt_usage(1024, 2048), "1.0 KB / 2.0 KB");
+    }
+
+    #[test]
+    fn app_row_texts() {
+        let mut a = AppUsage {
+            handle: p4os_sdk::AppHandle::Builtin(1),
+            name: "Music".into(),
+            state: AppState::Background,
+            cpu_permille: 25,
+            cpu_ms: 0,
+            sram: 0,
+            psram: 0,
+            note: "audio".into(),
+            frame_us: 0,
+        };
+        assert_eq!(state_text(&a), "Background (audio)");
+        assert_eq!(fmt_cpu(a.cpu_permille), "2.5%");
+        a.handle = p4os_sdk::AppHandle::User(5);
+        a.note.clear();
+        a.state = AppState::Foreground;
+        assert_eq!(state_text(&a), "Foreground, isolated");
+        a.handle = p4os_sdk::AppHandle::Builtin(2);
+        a.frame_us = 12_345;
+        assert_eq!(state_text(&a), "Foreground, frame 12.3 ms");
     }
 
     #[test]

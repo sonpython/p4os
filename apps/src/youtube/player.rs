@@ -25,7 +25,13 @@ pub trait Player {
     /// The player is being closed: stop audio, free buffers.
     fn close(&mut self, _sys: &mut dyn System) {}
 
-    /// Keep playing while the screen is locked or off (see `App::background`).
+    /// Still playing: the app asks for background audio.
+    fn playing(&self) -> bool {
+        false
+    }
+
+    /// Keep playing without drawing (in the background, or while the screen
+    /// is locked or off; see `App::background_tick`).
     fn background(&mut self, _sys: &mut dyn System) -> Option<u32> {
         None
     }
@@ -67,6 +73,10 @@ impl Player for OnDevice {
 
     fn close(&mut self, sys: &mut dyn System) {
         self.view.close(sys);
+    }
+
+    fn playing(&self) -> bool {
+        self.view.playing()
     }
 
     fn background(&mut self, sys: &mut dyn System) -> Option<u32> {

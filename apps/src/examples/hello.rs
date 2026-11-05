@@ -10,10 +10,11 @@
 use alloc::boxed::Box;
 use alloc::format;
 use p4os_sdk::gui::ui::{Align, Key};
-use p4os_sdk::{App, AppInfo, Canvas, Color, Rect, System, Ui};
+use p4os_sdk::{App, AppInfo, Canvas, Capabilities, Color, Rect, System, Ui};
 
-/// What the launcher (here: the Examples folder) needs to know.
-pub const INFO: AppInfo = AppInfo { id: "example-hello", name: "Hello Counter", icon, create };
+/// What the launcher (here: the Examples page) needs to know.
+pub const INFO: AppInfo =
+    AppInfo { id: "example-hello", name: "Hello Counter", icon, create, background: Capabilities::NONE };
 
 fn create() -> Box<dyn App> {
     Box::new(Hello::default())

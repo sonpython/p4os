@@ -14,10 +14,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use p4os_sdk::gui::ui::{Align, Key};
-use p4os_sdk::{App, AppInfo, Canvas, Color, Orientation, Point, Rect, System, Ui};
+use p4os_sdk::{App, AppInfo, Canvas, Capabilities, Color, Orientation, Point, Rect, System, Ui};
 
 pub const APP_ID: &str = "ytplayer";
-pub const INFO: AppInfo = AppInfo { id: APP_ID, name: "YT Player", icon, create };
+/// Audio keeps playing in the background and while the screen is locked
+/// or off.
+pub const INFO: AppInfo = AppInfo { id: APP_ID, name: "YT Player", icon, create, background: Capabilities::AUDIO };
 
 /// Default video quality, chosen from the board benchmark: 144p decodes at
 /// ~70 fps on one core, 240p at ~21 fps (below the 25-30 fps of the streams).
@@ -80,7 +82,7 @@ impl App for PlayerApp {
         Some(self.view.tick_interval_ms())
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
+    fn on_stop(&mut self, sys: &mut dyn System) {
         self.view.close(sys);
     }
 
@@ -88,7 +90,11 @@ impl App for PlayerApp {
         self.view.fullscreen()
     }
 
-    fn background(&mut self, sys: &mut dyn System) -> Option<u32> {
+    fn background_work(&self) -> Capabilities {
+        if self.view.playing() { Capabilities::AUDIO } else { Capabilities::NONE }
+    }
+
+    fn background_tick(&mut self, sys: &mut dyn System) -> Option<u32> {
         self.view.background(sys)
     }
 
@@ -105,7 +111,8 @@ pub enum ViewEvent {
 }
 
 /// The player screen, embeddable in another app: forward `update`,
-/// `tick_interval_ms`, `fullscreen`, `background`, `keep_awake` and `close`.
+/// `tick_interval_ms`, `fullscreen`, `keep_awake` and `close`, and
+/// `background` from `App::background_tick` while `playing`.
 /// The screen repaints only the picture between most frames, so the host
 /// must not paint over `area` itself.
 #[derive(Default)]
@@ -152,6 +159,12 @@ impl PlayerView {
         p.background = true;
         p.tick(sys);
         p.is_active().then_some(BACKGROUND_TICK_MS)
+    }
+
+    /// A video is open and still playing or loading: the app should keep
+    /// running in the background (as `Capabilities::AUDIO`).
+    pub fn playing(&self) -> bool {
+        self.player.as_ref().is_some_and(|p| p.is_active())
     }
 
     /// Video is playing: the screen should stay on.

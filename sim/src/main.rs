@@ -5,6 +5,8 @@
 //! Script commands (one per argument or line):
 //!   tap X Y | drag X1 Y1 X2 Y2 | type TEXT | key enter|backspace|esc|up|down
 //!   wait MS | launch APP_ID | shot FILE.png | rotate (toggle orientation)
+//!   swipe X1 Y1 X2 Y2 MS [hold]   (real time; `hold` rests 400 ms before lifting)
+//!   down X Y | move X Y [MS] | up   (a touch in steps, e.g. for mid-gesture shots)
 //!   yt play ID [144|240|audio] | yt pause | yt seek N | yt stop | yt stat
 //!   config KEY VALUE (store a setting) | lock (lock the screen now)
 //!   mock URL_PART FILE [STATUS]
@@ -19,12 +21,23 @@
 //! Commands given as arguments use `;` as separator.
 
 mod host;
+mod memtag;
+
+#[global_allocator]
+static ALLOC: memtag::Counting = memtag::Counting;
 
 use p4os_apps::desktop::Desktop;
+use p4os_apps::wm::gesture::swipe_point;
 use p4os_sdk::gui::ui::{Input, Key};
 use p4os_sdk::{Canvas, Color, Orientation, Point, System};
 use std::time::{Duration, Instant};
 
+
+/// Touch sample interval of scripted gestures (the GUI loop polls every
+/// 16 ms on the board).
+const SAMPLE_MS: u64 = 16;
+/// Rest before lifting in `swipe ... hold`, above the switcher's 300 ms.
+const HOLD_MS: u64 = 400;
 
 struct Sim {
     desktop: Desktop,
@@ -68,7 +81,25 @@ impl Sim {
         self.input.delta = Point::new(p.x - self.input.pos.x, p.y - self.input.pos.y);
         self.input.pos = p;
         self.input.down = down;
+        self.input.fingers = down as u8;
         self.frame();
+    }
+
+    /// Move the finger along a path in real time, one sample per frame
+    /// interval, so the gesture recogniser sees realistic speeds.
+    fn glide(&mut self, from: Point, to: Point, ms: u64, hold: u64, lift: bool) {
+        let start = Instant::now();
+        loop {
+            let el = start.elapsed().as_millis() as u64;
+            match swipe_point(from, to, ms, hold, el) {
+                Some(p) => self.touch(p, true),
+                None => break,
+            }
+            std::thread::sleep(Duration::from_millis(SAMPLE_MS));
+        }
+        if lift {
+            self.touch(to, false);
+        }
     }
 
     fn wait(&mut self, ms: u64) {
@@ -144,6 +175,22 @@ impl Sim {
                 };
                 self.input.keys.push(k);
                 self.frame();
+            }
+            Some("swipe") => {
+                let (a, b) = (Point::new(num(1), num(2)), Point::new(num(3), num(4)));
+                let hold = if parts.get(6) == Some(&"hold") { HOLD_MS } else { 0 };
+                self.touch(a, true);
+                self.glide(a, b, num(5) as u64, hold, true);
+            }
+            Some("down") => self.touch(Point::new(num(1), num(2)), true),
+            Some("move") => {
+                let to = Point::new(num(1), num(2));
+                let ms = parts.get(3).map_or(160, |_| num(3) as u64);
+                self.glide(self.input.pos, to, ms, 0, false);
+            }
+            Some("up") => {
+                let p = self.input.pos;
+                self.touch(p, false);
             }
             Some("wait") => self.wait(num(1) as u64),
             Some("launch") => {

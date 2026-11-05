@@ -8,7 +8,7 @@ use p4os_sdk::gui::font::Font;
 use p4os_sdk::gui::ui::{Align, Key};
 use p4os_sdk::{App, AppInfo, Canvas, Color, Rect, System, Ui};
 
-pub const INFO: AppInfo = AppInfo { id: "game2048", name: "2048", icon, create };
+pub const INFO: AppInfo = AppInfo { id: "game2048", name: "2048", icon, create, background: p4os_sdk::Capabilities::NONE };
 
 const BEST_PATH: &str = "/sd/2048-best.txt";
 /// Minimum swipe length in pixels before it counts as a move.
@@ -371,7 +371,11 @@ impl App for Game2048 {
         }
     }
 
-    fn on_close(&mut self, sys: &mut dyn System) {
+    fn on_pause(&mut self, sys: &mut dyn System) {
+        self.save_best(sys);
+    }
+
+    fn on_stop(&mut self, sys: &mut dyn System) {
         self.save_best(sys);
     }
 }
