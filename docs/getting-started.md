@@ -2,6 +2,13 @@
 
 p4os là kernel viết bằng Rust, chạy bare-metal trên ESP32-P4 **rev v1.x**. Board mục tiêu là **Guition JC4880P443C**: màn 4,3" 480×800 ST7701S, cảm ứng GT911, codec ES8311, chip Wi-Fi ESP32-C6. Nó không dùng esp-hal, ESP-IDF hay FreeRTOS.
 
+<p align="center">
+  <a href="media/p4os-demo.mp4"><img src="media/p4os-demo-preview.gif" width="200" alt="p4os chạy trên board (tua nhanh 8 lần)"></a>
+  <img src="media/p4os-home.jpg" width="200" alt="Màn hình chính p4os">
+  <img src="media/board-back.jpg" width="200" alt="Mặt sau board Guition JC4880P443C">
+</p>
+<p align="center"><sub>p4os trên board thật; bấm vào ảnh động để xem <a href="media/p4os-demo.mp4">video demo 2,5 phút</a>.</sub></p>
+
 Muốn viết app (app tích hợp hoặc app user cách ly), xem [app-development.md](app-development.md): hướng dẫn bằng tiếng Anh, có tóm tắt tiếng Việt ở đầu, kèm các app mẫu trong `apps/src/examples/` và `userapps/ticker/`.
 
 ## Yêu cầu
@@ -102,9 +109,7 @@ Bố cục flash 16 MiB (theo bảng phân vùng có sẵn):
 
 ## Màn hình khoá
 
-| Màn hình khoá | Nhập sai | Bị khoá tạm | Ngang |
-|---|---|---|---|
-| ![](screenshots/lock-portrait.png) | ![](screenshots/lock-wrong.png) | ![](screenshots/lock-lockout.png) | ![](screenshots/lock-landscape.png) |
+<img src="media/p4os-lock-screen.jpg" width="260" alt="Màn hình khoá trên board">
 
 - Bật trong Settings > Security: công tắc **Lock screen**, nút **Set passcode** (hoặc **Change** / **Remove** khi đã có mã), và **Auto-lock**: `Screen off` (mặc định), `1 min`, `5 min`, `Never`. Mã là 4–8 chữ số, nhập hai lần để xác nhận. Bật công tắc khi chưa có mã thì sẽ chuyển sang bước đặt mã; đổi mã, xoá mã hay tắt khoá đều phải nhập mã hiện tại.
 - Màn hình khoá chỉ hoạt động khi đã bật **và** đã có mã. Nó hiện lúc khởi động, khi chạm biểu tượng ổ khoá trên thanh trạng thái (hoặc lệnh `lock now`), và tự khoá theo Auto-lock. Chế độ `Screen off` khoá khi màn hình tắt theo `power.off_s` (mục Quản lý năng lượng); trước lần tắt màn hình đầu tiên sau khi khởi động, nó vẫn dùng mốc dự phòng 1 phút không chạm. Nếu đặt `power.off_s` = 0 thì màn hình không tắt và sau lần đầu đó khoá không tự bật. `1 min` / `5 min` tính từ lần chạm cuối.
@@ -318,8 +323,6 @@ Giới hạn:
 
 App YouTube dùng YouTube Data API v3 chính thức: Home (feed từ các kênh đã đăng ký khi đăng nhập, video thịnh hành khi chưa đăng nhập), Search, Library (video đã thích, playlist, kênh đã đăng ký) và Account. Chưa phát được video trên board: nút Play hiện mã QR với link `https://youtu.be/<id>` để xem trên điện thoại.
 
-![feed](screenshots/youtube-feed.png) ![mã đăng nhập](screenshots/youtube-device-code.png)
-
 Không có khoá nào được ghi sẵn trong mã nguồn. Mỗi người tự tạo dự án Google Cloud của mình:
 
 1. Vào <https://console.cloud.google.com/>, tạo một project mới (ví dụ `p4os`).
@@ -344,4 +347,4 @@ Ghi chú:
 - App ở trạng thái **Testing** trên màn hình consent: refresh token hết hạn sau 7 ngày. Khi đó app báo cần đăng nhập lại và tự xoá token cũ. Muốn token dài hạn thì phải publish app.
 - Quota mặc định 10.000 đơn vị mỗi ngày, đặt lại lúc nửa đêm giờ Thái Bình Dương. Một lần tìm kiếm tốn 100 đơn vị; các lệnh khác (thịnh hành, chi tiết video, đã thích, playlist, đăng ký) tốn 1. Feed đăng ký được ghép từ 20 kênh (đăng ký, kênh, 1 playlist upload mỗi kênh, chi tiết video), khoảng 23 đơn vị mỗi lần làm mới, và được giữ 15 phút. Số đơn vị đã dùng trong ngày lưu ở `youtube.quota` và hiện ở tab Account; app từ chối lệnh vượt quota và dừng tới hôm sau khi Google báo `quotaExceeded`.
 - Ảnh thu nhỏ (`i.ytimg.com/vi/<id>/mqdefault.jpg`) chỉ được tải cho các dòng đang hiện trên màn hình, tối đa 2 lượt tải cùng lúc, giải mã mỗi khung hình một ảnh và không giải mã khi đang chạm màn hình; cache giữ tối đa 40 ảnh 160x90 (khoảng 1,1 MB, nằm trong PSRAM).
-- Ảnh chụp từ simulator (dữ liệu mẫu tự tạo, không dùng tài khoản thật): `cargo sim --script sim/fixtures/youtube/screens.sim`, ghi ra `docs/screenshots/youtube-*.png`.
+- Ảnh chụp từ simulator (dữ liệu mẫu tự tạo, không dùng tài khoản thật): `cargo sim --script sim/fixtures/youtube/screens.sim`, ghi ra `docs/screenshots/youtube-*.png` (không commit vào repo).

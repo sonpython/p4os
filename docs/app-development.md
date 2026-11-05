@@ -32,9 +32,9 @@ Most apps today are built-in apps. User-mode apps are the start of a safe app mo
 
 The examples are in [`apps/src/examples/`](../apps/src/examples/) and open from the **Examples** icon on the home screen:
 
-| Examples folder | Hello Counter | Lap Timer | Weather |
-|---|---|---|---|
-| ![](screenshots/example-folder.png) | ![](screenshots/example-hello.png) | ![](screenshots/example-laps.png) | ![](screenshots/example-weather.png) |
+<a href="media/p4os-demo.mp4"><img src="media/p4os-demo-preview.gif" width="200" alt="p4os on the board; the Examples folder appears at the end of the demo"></a>
+
+The demo video ends in the Examples folder. To see each example on your own machine, render it with the simulator script below.
 
 | Example | Shows |
 |---|---|
@@ -144,9 +144,7 @@ When the layout should change shape, compare the sides, as `weather.rs` does to 
         let (cols, rows) = if landscape { (4, 1) } else { (2, 2) };
 ```
 
-In landscape it also moves the Refresh button beside the card, since the screen is too low to stack them:
-
-![Weather in landscape](screenshots/example-weather-landscape.png)
+In landscape it also moves the Refresh button beside the card, since the screen is too low to stack them.
 
 The user rotates the screen from the status bar. An app can also read and request it with `sys.orientation()` and `sys.set_orientation(o)`; the change takes effect on the next frame and is saved.
 
@@ -348,9 +346,7 @@ The pattern from `weather.rs`: start the request, poll it every frame, tick only
     }
 ```
 
-Every failure becomes a message with a Retry button, here an HTTP 503 answered by a simulator fixture:
-
-![Weather error](screenshots/example-weather-error.png)
+Every failure becomes a message with a Retry button; the simulator script shows one with an HTTP 503 fixture.
 
 The YouTube app ([`apps/src/youtube/`](../apps/src/youtube/mod.rs)) shows the rest of the API: an OAuth device-flow sign-in with `post_form`, bearer tokens with `.header("Authorization", ...)`, and a validating, allocation-free JSON reader in [`json.rs`](../apps/src/youtube/json.rs). There is no JSON crate in the workspace; `weather.rs` has a small, tested `json_field` helper that is enough for a few fields of a well-formed response. A TLS handshake takes 0.25 to 1.6 s on the board, so show a loading state.
 
@@ -455,7 +451,7 @@ cargo sim "launch examples; tap 240 204; tap 388 728; tap 388 728; shot /tmp/hel
 cargo run --release -p p4os-sim --target x86_64-unknown-linux-gnu -- "launch calculator; shot /tmp/calc.png"
 ```
 
-The screenshots on this page were made with [`docs/screenshots/examples.sim`](screenshots/examples.sim).
+Render the example screens yourself with [`docs/screenshots/examples.sim`](screenshots/examples.sim): `cargo sim --script docs/screenshots/examples.sim` writes PNGs to `docs/screenshots/` (not committed).
 
 ### Build and flash
 
